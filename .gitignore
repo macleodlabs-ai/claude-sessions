@@ -1,0 +1,16 @@
+# Claude Code local config / session state
+.claude/
+.claude-clients/
+.claude-shared/
+
+# macOS
+.DS_Store
+
+# Editor/backups
+*.ccbak
+*.swp
+*~
+
+# Scratch / unpacked skill working dirs
+/tmp/skillwork/
+skillwork/

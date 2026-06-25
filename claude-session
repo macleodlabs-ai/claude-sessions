@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+#
+# claude-session — manage isolated, per-client Claude Code accounts on one machine.
+#
+# Owns the shell integration (the cc-<client> launchers, the bare-claude guard,
+# and a global, auto-sourcing `claude-session` command) and delegates per-client
+# memory + statusline config to claude-config-bootstrap's setup.sh.
+#
+# Usage:
+#   claude-session --create macleod clientA   # add one or more clients
+#   claude-session --delete clientA           # remove one or more clients
+#   claude-session --list                     # list configured clients
+#   claude-session --revert                   # remove all tooling (keep accounts)
+#   claude-session --revert --force           # also delete every client account dir
+#
+# Flags:
+#   --create NAME...   Bootstrap each client (config dir, memory, statusline, launcher).
+#   --delete NAME...   Remove each client's config dir and launcher.
+#   --list             Show configured clients.
+#   --revert           Remove rc launchers, the global command, and ~/.claude-shared.
+#                      Client account dirs are kept (reported, not deleted).
+#   --yes, -y          Skip confirmation prompts.
+#   --force            With --revert, also delete every client account dir (implies --yes).
+#   -h, --help         Show this help.
+
+set -euo pipefail
+
+# --- styling ---------------------------------------------------------------
+if [ -t 1 ]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
+  GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; BLUE=$'\033[34m'
+else BOLD=""; DIM=""; RESET=""; GREEN=""; YELLOW=""; RED=""; BLUE=""; fi
+ok()   { printf "  ${GREEN}✓${RESET} %s\n" "$1"; }
+add()  { printf "  ${BLUE}+${RESET} %s\n" "$1"; }
+warn() { printf "  ${YELLOW}!${RESET} %s\n" "$1"; }
+err()  { printf "  ${RED}✗${RESET} %s\n" "$1" >&2; }
+info() { printf "  ${DIM}%s${RESET}\n" "$1"; }
+hdr()  { printf "\n${BOLD}%s${RESET}\n" "$1"; }
+die()  { err "$1"; exit "${2:-1}"; }
+
+# --- paths & config --------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SHARED_DIR="${SHARED_DIR:-$HOME/.claude-shared}"
+CLIENTS_PARENT="${CLIENTS_PARENT:-$HOME/.claude-clients}"
+SKILLS_DIR="${SKILLS_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills}"
+CLI_INSTALL_PATH="${SHARED_DIR}/claude-session"
+DEST_SKILL="${SKILLS_DIR}/claude-config-bootstrap"
+
+SENTINEL_BEGIN="<!-- claude-config-bootstrap:begin -->"   # marks a bootstrapped CLAUDE.md
+RC_BEGIN="# >>> claude-config-bootstrap launchers >>>"
+RC_END="# <<< claude-config-bootstrap launchers <<<"
+
+# --- rc file ---------------------------------------------------------------
+RC_FILE="${RC_FILE:-}"
+if [ -z "$RC_FILE" ]; then
+  case "${SHELL:-}" in
+    *bash) RC_FILE="$HOME/.bashrc" ;;
+    *)     RC_FILE="$HOME/.zshrc" ;;
+  esac
+fi
+
+# --- arg parsing -----------------------------------------------------------
+MODE=""; FORCE=0; ASSUME_YES=0; declare -a NAMES=()
+print_help() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
+sanitize() { printf '%s' "$1" | tr -cd '[:alnum:]_-'; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --create) MODE="create"; shift ;;
+    --delete) MODE="delete"; shift ;;
+    --list)   MODE="list"; shift ;;
+    --revert) MODE="revert"; shift ;;
+    --yes|-y) ASSUME_YES=1; shift ;;
+    --force)  FORCE=1; ASSUME_YES=1; shift ;;
+    -h|--help) print_help; exit 0 ;;
+    --*) die "Unknown flag: $1 (try --help)" 2 ;;
+    *) NAMES+=("$(sanitize "$1")"); shift ;;
+  esac
+done
+[ -n "$MODE" ] || { print_help; exit 0; }
+
+# --- helpers ---------------------------------------------------------------
+confirm() {  # $1 = prompt; returns 0 to proceed
+  [ "$ASSUME_YES" -eq 1 ] && return 0
+  printf "  ${YELLOW}?${RESET} %s [y/N] " "$1"
+  local r; read -r r </dev/tty || r=""
+  case "$r" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
+}
+
+fn_label() { local b; b="$(basename "$1")"; b="${b#.claude-}"; printf 'cc-%s' "$(sanitize "$b")"; }
+
+discover_dirs() {  # populates global CC_DIRS with bootstrapped client dirs
+  CC_DIRS=()
+  [ -d "$CLIENTS_PARENT" ] || return 0
+  local d
+  for d in "$CLIENTS_PARENT"/*/; do
+    d="${d%/}"; [ -d "$d" ] || continue
+    [ -f "$d/CLAUDE.md" ] && grep -qF "$SENTINEL_BEGIN" "$d/CLAUDE.md" 2>/dev/null && CC_DIRS+=("$d")
+  done
+}
+
+build_block() {  # prints the rc block for the current CC_DIRS
+  printf '%s\n' "$RC_BEGIN"
+  printf '# Managed by claude-session. Do not edit between these markers;\n'
+  printf '# run `claude-session --create/--delete` to refresh, `--revert` to remove.\n'
+  local d
+  for d in "${CC_DIRS[@]}"; do
+    printf '%s() { CLAUDE_CONFIG_DIR=%q command claude "$@"; }\n' "$(fn_label "$d")" "$d"
+  done
+  # Global, auto-sourcing wrapper: runs the installed CLI then reloads this shell
+  # so freshly-added cc-<client> launchers are usable immediately.
+  printf 'claude-session() { CLAUDE_SESSION_WRAPPED=1 %q "$@"; local _rc=$?; source %q; return $_rc; }\n' \
+    "$CLI_INSTALL_PATH" "$RC_FILE"
+  cat <<'NEUTER'
+claude() {
+  printf 'Refusing to launch an unlabeled claude (would use the DEFAULT ~/.claude account).\n' >&2
+  printf 'Use one of the per-client launchers instead:\n' >&2
+  typeset -f 2>/dev/null | grep -oE '^cc-[A-Za-z0-9_-]+' | sort -u | sed 's/^/  /' >&2 || true
+  printf 'Or run: command claude   (to bypass this guard on purpose)\n' >&2
+  return 1
+}
+NEUTER
+  printf '%s\n' "$RC_END"
+}
+
+apply_block() {  # $1 = block text, or "" to remove the block entirely
+  local newblock="$1" tmp had=0
+  mkdir -p "$(dirname "$RC_FILE")"; [ -f "$RC_FILE" ] || : > "$RC_FILE"
+  grep -qF "$RC_BEGIN" "$RC_FILE" && had=1
+  cp "$RC_FILE" "${RC_FILE}.ccbak" 2>/dev/null || true
+  tmp="$(mktemp)"
+  # Strip any existing block (awk without -v body interpolation keeps backslashes intact).
+  awk -v b="$RC_BEGIN" -v e="$RC_END" '
+    $0==b {skip=1; next} $0==e {skip=0; next} skip==0 {print}
+  ' "$RC_FILE" > "$tmp"
+  if [ -n "$newblock" ]; then
+    printf '%s\n\n%s\n' "$(cat "$tmp")" "$newblock" > "$RC_FILE"
+  else
+    printf '%s\n' "$(cat "$tmp")" > "$RC_FILE"
+  fi
+  rm -f "$tmp"
+  return "$had"  # 1 if a block already existed (informational)
+}
+
+rebuild_launchers() {
+  discover_dirs
+  if [ "${#CC_DIRS[@]}" -eq 0 ]; then
+    apply_block "" || true
+    add "No clients left — removed launcher block (bare 'claude' restored)"
+  else
+    apply_block "$(build_block)" || true
+    local d names=""
+    for d in "${CC_DIRS[@]}"; do names="${names} $(fn_label "$d")"; done
+    ok "Launchers refreshed:${names}"
+  fi
+}
+
+find_setup() {
+  local c
+  for c in "$SCRIPT_DIR/claude-config-bootstrap/scripts/setup.sh" "$DEST_SKILL/scripts/setup.sh"; do
+    [ -f "$c" ] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+
+install_skill() {  # copy the skill into the skills dir so Claude can trigger it
+  local src=""
+  if [ -d "$SCRIPT_DIR/claude-config-bootstrap" ]; then src="$SCRIPT_DIR/claude-config-bootstrap"
+  elif [ -d "$DEST_SKILL" ]; then src="$DEST_SKILL"; fi
+  [ -n "$src" ] || die "skill source not found (run from the repo, or reinstall)"
+  if [ ! "$src" -ef "$DEST_SKILL" ]; then
+    mkdir -p "$SKILLS_DIR"; rm -rf "$DEST_SKILL"; cp -R "$src" "$DEST_SKILL"
+    ok "Installed skill → $DEST_SKILL"
+  else
+    ok "Skill already installed → $DEST_SKILL"
+  fi
+  chmod +x "$DEST_SKILL/scripts/setup.sh" 2>/dev/null || true
+}
+
+install_cli() {  # make `claude-session` globally available
+  mkdir -p "$SHARED_DIR"
+  if [ ! "$0" -ef "$CLI_INSTALL_PATH" ]; then
+    cp "$0" "$CLI_INSTALL_PATH"; chmod +x "$CLI_INSTALL_PATH"
+    ok "Installed command → $CLI_INSTALL_PATH"
+  fi
+}
+
+finish() {  # tell the user how/whether the shell got reloaded
+  if [ "${CLAUDE_SESSION_WRAPPED:-0}" = "1" ]; then
+    printf "\n${GREEN}Done.${RESET} Shell reloaded automatically.\n"
+  else
+    printf "\n${GREEN}Done.${RESET} One-time step: ${BOLD}source %s${RESET} (or open a new terminal).\n" "$RC_FILE"
+    info "After that, 'claude-session' is available everywhere and reloads your shell for you."
+  fi
+}
+
+# --- commands --------------------------------------------------------------
+cmd_create() {
+  [ "${#NAMES[@]}" -gt 0 ] || die "Usage: claude-session --create <name> [name...]"
+  hdr "Creating clients: ${NAMES[*]}"
+  install_skill
+  install_cli
+  local setup; setup="$(find_setup)" || die "setup.sh not found"
+  local n
+  for n in "${NAMES[@]}"; do
+    [ -n "$n" ] || continue
+    printf "\n${BOLD}• %s${RESET}\n" "$n"
+    bash "$setup" --client "$n" --clients-parent "$CLIENTS_PARENT" --shared-dir "$SHARED_DIR"
+  done
+  hdr "Shell launchers"
+  rebuild_launchers
+  finish
+}
+
+cmd_delete() {
+  [ "${#NAMES[@]}" -gt 0 ] || die "Usage: claude-session --delete <name> [name...]"
+  hdr "Deleting clients: ${NAMES[*]}"
+  local n dir
+  for n in "${NAMES[@]}"; do
+    [ -n "$n" ] || continue
+    dir="$CLIENTS_PARENT/$n"
+    if [ -d "$dir" ]; then
+      if confirm "Delete $dir? (removes that account's local login + history)"; then
+        rm -rf "$dir"; ok "Removed $dir"
+      else
+        warn "Skipped $n"
+      fi
+    else
+      warn "No client dir for '$n' at $dir — skipping"
+    fi
+  done
+  hdr "Shell launchers"
+  rebuild_launchers
+  finish
+}
+
+cmd_list() {
+  discover_dirs
+  hdr "Configured clients"
+  if [ "${#CC_DIRS[@]}" -eq 0 ]; then
+    info "none — create one with: claude-session --create <name>"
+  else
+    local d
+    for d in "${CC_DIRS[@]}"; do printf "  ${GREEN}●${RESET} %-16s ${DIM}%s${RESET}\n" "$(basename "$d")" "$d"; done
+  fi
+}
+
+cmd_revert() {
+  hdr "Revert"
+  discover_dirs
+  if [ "$FORCE" -eq 1 ]; then
+    warn "FORCE: this will also DELETE every client account dir and its logins/history."
+  else
+    info "Removing tooling only — client account dirs are kept (use --force to delete them too)."
+  fi
+  confirm "Remove launchers, the global command, and $SHARED_DIR?" || { info "Aborted. Nothing changed."; exit 0; }
+
+  apply_block "" || true
+  ok "Removed launcher block ($RC_FILE) — bare 'claude' restored (backup: ${RC_FILE}.ccbak)"
+
+  [ -d "$DEST_SKILL" ] && { rm -rf "$DEST_SKILL"; ok "Removed installed skill ($DEST_SKILL)"; }
+  # Removing SHARED_DIR also removes the global claude-session command living inside it.
+  [ -d "$SHARED_DIR" ] && { rm -rf "$SHARED_DIR"; ok "Removed shared dir ($SHARED_DIR)"; }
+
+  if [ "$FORCE" -eq 1 ]; then
+    local d
+    for d in "${CC_DIRS[@]:-}"; do
+      [ -n "$d" ] || continue
+      rm -rf "$d"; ok "Removed client dir ($d)"
+    done
+  elif [ "${#CC_DIRS[@]}" -gt 0 ]; then
+    warn "Kept ${#CC_DIRS[@]} client dir(s). They still hold their accounts, but their"
+    warn "CLAUDE.md import + statusline now point at the removed shared files. Remove with:"
+    local d
+    for d in "${CC_DIRS[@]}"; do info "rm -rf $d"; done
+  fi
+  finish
+}
+
+case "$MODE" in
+  create) cmd_create ;;
+  delete) cmd_delete ;;
+  list)   cmd_list ;;
+  revert) cmd_revert ;;
+esac
