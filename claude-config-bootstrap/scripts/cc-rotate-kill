@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+#
+# cc-rotate-kill — StopFailure hook helper for cc-rotate pools.
+#
+# Wired into each pool member's settings.json under hooks.StopFailure with
+# matchers "rate_limit" and "billing_error". When a turn ends in one of those
+# API errors, this tells the cc-rotate supervisor to rotate: it touches the
+# rotate flag and TERMs the claude process so the supervisor's wait() returns.
+#
+# Gated hard: unless the session was launched by cc-rotate (CC_ROTATE_ACTIVE=1
+# and a live pid file), this is a silent no-op — so the hook is harmless in
+# pool dirs launched directly (e.g. for /login) and in plain cc-<client> use.
+
+cat > /dev/null 2>&1 || true   # drain the hook's stdin payload
+
+[ "${CC_ROTATE_ACTIVE:-0}" = "1" ] || exit 0
+[ -n "${CC_ROTATE_PIDFILE:-}" ] || exit 0
+[ -f "$CC_ROTATE_PIDFILE" ] || exit 0
+
+pid="$(cat "$CC_ROTATE_PIDFILE" 2>/dev/null || true)"
+case "$pid" in ''|*[!0-9]*) exit 0 ;; esac
+
+touch "${CC_ROTATE_PIDFILE}.rotate"
+kill -TERM "$pid" 2>/dev/null || true
+exit 0

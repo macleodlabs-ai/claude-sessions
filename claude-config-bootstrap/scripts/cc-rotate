@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+#
+# cc-rotate — restart+resume rate-limit rotation supervisor for claude-session pools.
+#
+# Launches `claude` under the first account in a client's pool. When that
+# account hits its rate limit, a StopFailure hook (cc-rotate-kill) signals this
+# supervisor, which relaunches under the NEXT account in the pool with
+# `--resume <session-id>` — same conversation, different subscription, ~2s gap.
+#
+# Every request is made by the genuine `claude` binary using that account's own
+# OAuth login. No tokens are extracted, shared, or proxied.
+#
+# Usage: cc-rotate <client> [claude args...]
+#   (normally invoked by the cc-<client> launcher, not by hand)
+#
+# Pool file:  $SHARED_DIR/pools/<client>.pool   (one config-dir path per line)
+# History:    $SHARED_DIR/pools/<client>-projects (shared via symlinks so
+#             --resume finds the transcript from any account in the pool)
+
+set -uo pipefail
+
+if [ -t 2 ]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
+  RED=$'\033[31m'; YELLOW=$'\033[33m'; CYAN=$'\033[36m'
+else BOLD=""; DIM=""; RESET=""; RED=""; YELLOW=""; CYAN=""; fi
+note() { printf "${CYAN}cc-rotate:${RESET} %s\n" "$1" >&2; }
+warn() { printf "${YELLOW}cc-rotate:${RESET} %s\n" "$1" >&2; }
+fail() { printf "${RED}${BOLD}cc-rotate: %s${RESET}\n" "$1" >&2; }
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SHARED_DIR="${SHARED_DIR:-$SCRIPT_DIR}"
+POOLS_DIR="${SHARED_DIR}/pools"
+
+CLIENT="${1:-}"
+[ -n "$CLIENT" ] || { fail "usage: cc-rotate <client> [claude args...]"; exit 2; }
+shift
+
+POOL_FILE="${POOLS_DIR}/${CLIENT}.pool"
+PROJECTS="${POOLS_DIR}/${CLIENT}-projects"
+[ -f "$POOL_FILE" ] || { fail "no pool file at $POOL_FILE — create one with: claude-session --pool-add $CLIENT"; exit 2; }
+
+# Read the pool (skip blanks/comments, warn on missing dirs).
+DIRS=()
+while IFS= read -r line; do
+  case "$line" in ''|\#*) continue ;; esac
+  if [ -d "$line" ]; then DIRS+=("$line")
+  else warn "pool entry missing on disk, skipping: $line"; fi
+done < "$POOL_FILE"
+[ "${#DIRS[@]}" -gt 0 ] || { fail "pool for '$CLIENT' is empty — add accounts with: claude-session --pool-add $CLIENT"; exit 2; }
+
+# Wiring for the StopFailure hook: the hook reads our pid file (path exported
+# below), touches "<pidfile>.rotate", and TERMs the claude process. We rotate
+# only when that flag exists; any other exit passes straight through.
+PIDFILE="$(mktemp "${TMPDIR:-/tmp}/cc-rotate.XXXXXX")"
+ROTATE_FLAG="${PIDFILE}.rotate"
+export CC_ROTATE_PIDFILE="$PIDFILE"
+export CC_ROTATE_ACTIVE=1
+trap 'rm -f "$PIDFILE" "$ROTATE_FLAG"' EXIT
+trap '' INT   # Ctrl+C belongs to claude; we exit when it does
+
+SESSION_ID=""
+LAST_DIR=""
+STATUS=0
+for dir in "${DIRS[@]}"; do
+  label="${dir##*/}"
+  export CLAUDE_CONFIG_DIR="$dir"
+  LAST_DIR="$dir"
+
+  args=()
+  if [ -n "$SESSION_ID" ]; then
+    args+=(--resume "$SESSION_ID")
+    note "switching to ${BOLD}${label}${RESET} and resuming session ${SESSION_ID}"
+  else
+    note "launching on ${BOLD}${label}${RESET}"
+  fi
+  args+=("$@")
+
+  rm -f "$ROTATE_FLAG"
+  command claude "${args[@]}" &
+  pid=$!
+  printf '%s\n' "$pid" > "$PIDFILE"
+  wait "$pid"
+  STATUS=$?
+
+  if [ ! -f "$ROTATE_FLAG" ]; then
+    # Normal end: user quit, or claude died for a non-rate-limit reason.
+    if [ "$STATUS" -ne 0 ] && [ -n "$SESSION_ID" ]; then
+      warn "claude exited with status $STATUS. If the resume failed, retry by hand:"
+      warn "  CLAUDE_CONFIG_DIR=${dir} command claude --resume ${SESSION_ID}"
+    fi
+    exit "$STATUS"
+  fi
+
+  # Rate limit hit. Recover the newest transcript so the next account resumes
+  # it (resume can mint a new session UUID, so always re-read the newest file).
+  fail "${label} hit its rate limit"
+  latest="$(ls -t "$PROJECTS"/*/*.jsonl 2>/dev/null | head -n 1 || true)"
+  if [ -n "$latest" ]; then
+    SESSION_ID="$(basename "$latest" .jsonl)"
+  else
+    warn "no transcript found under $PROJECTS — next account starts a fresh session"
+    SESSION_ID=""
+  fi
+done
+
+fail "ALL ACCOUNTS IN POOL '${CLIENT}' ARE RATE-LIMITED — not launching anything."
+warn "Check reset times with /usage, or wait out the 5-hour window."
+if [ -n "$SESSION_ID" ]; then
+  warn "Resume this conversation later with:"
+  warn "  CLAUDE_CONFIG_DIR=${LAST_DIR} command claude --resume ${SESSION_ID}"
+fi
+exit 1

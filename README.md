@@ -79,6 +79,97 @@ claude-session --delete clientA     # remove one or more clients (prompts first)
 Every subcommand is idempotent and refreshes the launchers from the live set of
 clients (the shell reloads automatically).
 
+## Rate-limit rotation (pools)
+
+A client can have a **rotation pool**: extra accounts (each with its own
+subscription) that `cc-<client>` automatically fails over to when the active
+account hits its rate limit — killing the session, relaunching under the next
+account, and **resuming the same conversation** with `--resume` (~2s gap,
+context intact). Clients without a pool are completely unaffected.
+
+It's a restart+resume supervisor, not a proxy: every request is made by the
+real `claude` binary using that account's own login. No tokens are extracted,
+shared, or proxied.
+
+### Upgrading an existing setup
+
+Already running `claude-session` with clients like `macleod` / `nr` / `iris`?
+Nothing to migrate — pool support installs over the top:
+
+```bash
+cd claude-sessions && git pull
+./claude-session --pool-add macleod    # run from the repo once; upgrades itself too
+```
+
+That single command upgrades the installed `claude-session`, installs the
+`cc-rotate` supervisor, and converts `macleod` to pooled mode:
+
+1. Creates and bootstraps `~/.claude-clients/macleod-2` (memory, statusline,
+   rate-limit hook) and writes the pool file
+   `~/.claude-shared/pools/macleod.pool` (`macleod` first, `macleod-2` second).
+2. Moves macleod's existing session history to the pool's shared location and
+   symlinks it back — **all existing macleod sessions stay resumable**, now
+   from any account in the pool.
+3. Launches Claude under `macleod-2` so you can log the new account in
+   (see below).
+
+Other clients (`cc-nr`, `cc-iris`) have no pool file, so they keep launching
+directly — zero behavior change.
+
+### Logging in the new account (the login IS the connection)
+
+There's no separate "linking" step: a pool member is just an isolated config
+dir, and it's connected the moment you log a subscription into it. At the end
+of `--pool-add` you land in Claude Code under the new dir:
+
+1. Run `/login` if you're not prompted automatically.
+2. In the browser OAuth page, **sign into your *second* Anthropic account** —
+   the new Pro/Max subscription, *not* the one macleod already uses. If the
+   browser auto-picks your usual account, switch accounts on that page.
+   (Reusing the same account would mean both pool members share one rate
+   limit — pointless.)
+3. Exit Claude. Done — credentials live in `~/.claude-clients/macleod-2`,
+   isolated exactly like your other clients.
+
+Quit before finishing, or want to re-login later? No config dir to remember —
+just name the account:
+
+```bash
+claude-session --login macleod-2   # relaunch the login for one account
+claude-session --login macleod     # log in EVERY pool member still missing credentials
+```
+
+### Daily use
+
+```bash
+cc-macleod          # exactly as before
+```
+
+`cc-macleod` starts on your primary account. When it hits its 5-hour limit, a
+`StopFailure` hook fires, the supervisor switches to `macleod-2`, and your
+conversation resumes automatically (the statusline label shows which account
+is active). When **every** account in the pool is limited it fails loud —
+red message, soonest-reset hint, non-zero exit — never a silent fallback.
+
+```bash
+claude-session --pool-add macleod      # add another account (macleod-3, ...)
+claude-session --pool-list macleod     # members, rotation order, login state
+claude-session --login macleod-2       # (re)log in an account by name
+claude-session --pool-remove macleod-2 # remove an account (prompts first)
+```
+
+Removing the last member disbands the pool: `cc-macleod` goes back to
+single-account and its session history moves back into its own dir.
+
+> **A word on terms of service.** This keeps every request inside the genuine
+> Claude Code binary with that account's own OAuth login — it avoids the
+> token-proxy pattern Anthropic actively bans. Rotating accounts to extend
+> usage is still a gray area under Anthropic's limit-circumvention policy:
+> keep it to your own subscriptions at a human pace, and know that heavy
+> always-on workloads belong on API-key billing instead.
+
+---
+
 ### Removing everything
 
 ```bash
@@ -89,7 +180,9 @@ claude-session --revert --force  # also delete every account dir
 `--revert` removes the rc launcher block (restoring a normal bare `claude`), the
 global command, and `~/.claude-shared`. By default your `~/.claude-clients/*`
 account dirs are kept and reported (they hold real logins/history); add
-`--force` to delete those too. Add `-y`/`--yes` to skip confirmation prompts.
+`--force` to delete those too (pool members included). Add `-y`/`--yes` to skip
+confirmation prompts. Pooled session history is restored to each client's
+primary dir *before* the shared dir is deleted, so no transcripts are lost.
 
 ---
 
@@ -124,6 +217,9 @@ If the footer is blank or wrong, quit and relaunch with `cc-<client>`.
 | Footer shows `⚪ DEFAULT` | You didn't use a `cc-` command. Quit, relaunch with `cc-<client>`. |
 | Footer missing model/folder | Install jq: `brew install jq` |
 | Footer didn't change after setup | Quit Claude and relaunch with `cc-<client>` |
+| Rotation didn't fire on a rate limit | Check the pool member's `settings.json` has the `StopFailure` hook and that you launched via `cc-<client>` (direct `claude` runs never rotate — that's the safety gate) |
+| `No conversation found with session ID` after a switch | The pool dirs must share history — `claude-session --pool-list <client>` should show every member; re-run `--pool-add` wiring by checking each dir's `projects` is a symlink into `~/.claude-shared/pools/` |
+| Pool member shows `NO CREDENTIALS` | `claude-session --login <member>`, then `/login` inside the session |
 
 ---
 
