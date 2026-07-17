@@ -93,7 +93,7 @@ shared, or proxied.
 
 ### Upgrading an existing setup
 
-Already running `claude-session` with clients like `macleod` / `nr` / `iris`?
+Already running `claude-session` with clients like `macleod` / `clientA` / `clientB`?
 Nothing to migrate — pool support installs over the top:
 
 ```bash
@@ -113,7 +113,7 @@ That single command upgrades the installed `claude-session`, installs the
 3. Launches Claude under `macleod-2` so you can log the new account in
    (see below).
 
-Other clients (`cc-nr`, `cc-iris`) have no pool file, so they keep launching
+Other clients (`cc-clientA`, `cc-clientB`) have no pool file, so they keep launching
 directly — zero behavior change.
 
 ### Logging in the new account (the login IS the connection)
