@@ -10,18 +10,31 @@
 #   claude-session --create macleod clientA   # add one or more clients
 #   claude-session --delete clientA           # remove one or more clients
 #   claude-session --list                     # list configured clients
+#   claude-session --pool-add macleod         # add a rotation account to a client
+#   claude-session --pool-list macleod        # show a client's rotation pool
+#   claude-session --pool-remove macleod-2    # remove a rotation account
 #   claude-session --revert                   # remove all tooling (keep accounts)
 #   claude-session --revert --force           # also delete every client account dir
 #
 # Flags:
-#   --create NAME...   Bootstrap each client (config dir, memory, statusline, launcher).
-#   --delete NAME...   Remove each client's config dir and launcher.
-#   --list             Show configured clients.
-#   --revert           Remove rc launchers, the global command, and ~/.claude-shared.
-#                      Client account dirs are kept (reported, not deleted).
-#   --yes, -y          Skip confirmation prompts.
-#   --force            With --revert, also delete every client account dir (implies --yes).
-#   -h, --help         Show this help.
+#   --create NAME...     Bootstrap each client (config dir, memory, statusline, launcher).
+#   --delete NAME...     Remove each client's config dir and launcher.
+#   --list               Show configured clients.
+#   --pool-add CLIENT    Add the next rotation account (<client>-2, -3, ...) to CLIENT's
+#                        pool and walk you through logging it in. cc-<client> then
+#                        auto-rotates to the next account on a rate limit, resuming
+#                        the same conversation.
+#   --pool-list CLIENT   Show CLIENT's pool members, order, and login state.
+#   --pool-remove NAME   Remove pool member NAME (e.g. macleod-2) and delete its dir.
+#                        Removing the last member disbands the pool (single-account
+#                        behavior and private history are restored).
+#   --revert             Remove rc launchers, the global command, and ~/.claude-shared.
+#                        Client account dirs are kept; pooled session history is
+#                        restored to each client's primary dir first.
+#   --yes, -y            Skip confirmation prompts.
+#   --force              With --revert, also delete every client account dir,
+#                        including pool members (implies --yes).
+#   -h, --help           Show this help.
 
 set -euo pipefail
 
@@ -45,6 +58,8 @@ CLIENTS_PARENT="${CLIENTS_PARENT:-$HOME/.claude-clients}"
 SKILLS_DIR="${SKILLS_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills}"
 CLI_INSTALL_PATH="${SHARED_DIR}/claude-session"
 DEST_SKILL="${SKILLS_DIR}/claude-config-bootstrap"
+POOLS_DIR="${SHARED_DIR}/pools"
+POOL_MARKER=".ccb-pool-member"   # present in a dir => rotation member, not a client
 
 SENTINEL_BEGIN="<!-- claude-config-bootstrap:begin -->"   # marks a bootstrapped CLAUDE.md
 RC_BEGIN="# >>> claude-config-bootstrap launchers >>>"
@@ -61,7 +76,7 @@ fi
 
 # --- arg parsing -----------------------------------------------------------
 MODE=""; FORCE=0; ASSUME_YES=0; declare -a NAMES=()
-print_help() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
+print_help() { sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; }
 sanitize() { printf '%s' "$1" | tr -cd '[:alnum:]_-'; }
 
 while [ $# -gt 0 ]; do
@@ -69,6 +84,9 @@ while [ $# -gt 0 ]; do
     --create) MODE="create"; shift ;;
     --delete) MODE="delete"; shift ;;
     --list)   MODE="list"; shift ;;
+    --pool-add)    MODE="pool-add"; shift ;;
+    --pool-list)   MODE="pool-list"; shift ;;
+    --pool-remove) MODE="pool-remove"; shift ;;
     --revert) MODE="revert"; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     --force)  FORCE=1; ASSUME_YES=1; shift ;;
@@ -95,6 +113,7 @@ discover_dirs() {  # populates global CC_DIRS with bootstrapped client dirs
   local d
   for d in "$CLIENTS_PARENT"/*/; do
     d="${d%/}"; [ -d "$d" ] || continue
+    [ -f "$d/$POOL_MARKER" ] && continue   # rotation members aren't standalone clients
     [ -f "$d/CLAUDE.md" ] && grep -qF "$SENTINEL_BEGIN" "$d/CLAUDE.md" 2>/dev/null && CC_DIRS+=("$d")
   done
 }
@@ -103,9 +122,13 @@ build_block() {  # prints the rc block for the current CC_DIRS
   printf '%s\n' "$RC_BEGIN"
   printf '# Managed by claude-session. Do not edit between these markers;\n'
   printf '# run `claude-session --create/--delete` to refresh, `--revert` to remove.\n'
+  # Each launcher checks for a rotation pool at runtime: with a pool file the
+  # cc-rotate supervisor takes over (rotate accounts on rate limit); without
+  # one it launches claude directly, exactly as before.
   local d
   for d in "${CC_DIRS[@]}"; do
-    printf '%s() { CLAUDE_CONFIG_DIR=%q command claude "$@"; }\n' "$(fn_label "$d")" "$d"
+    printf '%s() { if [ -f %q ]; then %q %q "$@"; else CLAUDE_CONFIG_DIR=%q command claude "$@"; fi; }\n' \
+      "$(fn_label "$d")" "$POOLS_DIR/$(basename "$d").pool" "$SHARED_DIR/cc-rotate" "$(basename "$d")" "$d"
   done
   # Global, auto-sourcing wrapper: runs the installed CLI then reloads this shell
   # so freshly-added cc-<client> launchers are usable immediately.
@@ -185,6 +208,121 @@ install_cli() {  # make `claude-session` globally available
   fi
 }
 
+# --- rotation pools ----------------------------------------------------------
+pool_file() { printf '%s/%s.pool' "$POOLS_DIR" "$1"; }
+pool_projects() { printf '%s/%s-projects' "$POOLS_DIR" "$1"; }
+
+install_rotate() {  # copy the supervisor + hook helper next to the CLI
+  local src_dir="" c f
+  for c in "$SCRIPT_DIR/claude-config-bootstrap/scripts" "$DEST_SKILL/scripts"; do
+    [ -f "$c/cc-rotate" ] && { src_dir="$c"; break; }
+  done
+  [ -n "$src_dir" ] || die "cc-rotate scripts not found (run from the repo, or reinstall)"
+  mkdir -p "$SHARED_DIR"
+  for f in cc-rotate cc-rotate-kill; do
+    if [ -f "$SHARED_DIR/$f" ] && cmp -s "$src_dir/$f" "$SHARED_DIR/$f"; then
+      ok "$f already installed → $SHARED_DIR/$f"
+    else
+      cp "$src_dir/$f" "$SHARED_DIR/$f"; chmod +x "$SHARED_DIR/$f"
+      add "Installed $f → $SHARED_DIR/$f"
+    fi
+  done
+}
+
+wire_hook() {  # $1 = config dir: add the StopFailure rate-limit hook to settings.json
+  local dir="$1" settings="$1/settings.json" kill_cmd="$SHARED_DIR/cc-rotate-kill"
+  local snippet='"hooks": { "StopFailure": [
+    { "matcher": "rate_limit",    "hooks": [ { "type": "command", "command": "'"$kill_cmd"'" } ] },
+    { "matcher": "billing_error", "hooks": [ { "type": "command", "command": "'"$kill_cmd"'" } ] }
+  ] }'
+  if [ -f "$settings" ] && grep -qF "cc-rotate-kill" "$settings"; then
+    ok "Rate-limit hook already wired in ${dir##*/}/settings.json"
+    return 0
+  fi
+  if [ ! -f "$settings" ]; then
+    mkdir -p "$dir"
+    printf '{\n  %s\n}\n' "$snippet" > "$settings"
+    add "Created settings.json with rate-limit hook in ${dir##*/}"
+  elif command -v jq >/dev/null 2>&1; then
+    local tmp; tmp="$(mktemp)"
+    if jq --arg cmd "$kill_cmd" '.hooks.StopFailure = ((.hooks.StopFailure // []) + [
+          {matcher: "rate_limit",    hooks: [{type: "command", command: $cmd}]},
+          {matcher: "billing_error", hooks: [{type: "command", command: $cmd}]}
+        ])' "$settings" > "$tmp" 2>/dev/null; then
+      mv "$tmp" "$settings"
+      add "Added rate-limit hook to existing settings.json (other keys preserved) in ${dir##*/}"
+    else
+      rm -f "$tmp"
+      err "${dir##*/}/settings.json isn't valid JSON — refusing to edit it."
+      warn "Fix the JSON, then add manually:"; info "  $snippet"
+    fi
+  else
+    warn "${dir##*/}/settings.json exists and jq isn't installed — can't merge safely."
+    warn "Add this key manually to $settings:"; info "  $snippet"
+  fi
+}
+
+share_projects() {  # $1 = config dir, $2 = client: point $1/projects at the pool's shared history
+  local dir="$1" shared; shared="$(pool_projects "$2")"
+  mkdir -p "$shared"
+  if [ -L "$dir/projects" ]; then
+    ok "Session history already shared for ${dir##*/}"
+    return 0
+  fi
+  if [ -d "$dir/projects" ]; then
+    # Move existing history into the shared location (merge, never delete).
+    find "$dir/projects" -mindepth 1 -maxdepth 1 -exec mv {} "$shared"/ \;
+    rmdir "$dir/projects"
+    add "Moved existing session history of ${dir##*/} → $shared"
+  fi
+  mkdir -p "$dir"
+  ln -s "$shared" "$dir/projects"
+  add "Linked ${dir##*/}/projects → shared pool history"
+}
+
+restore_projects() {  # $1 = primary config dir, $2 = client: give history back to the primary
+  local dir="$1" shared; shared="$(pool_projects "$2")"
+  [ -L "$dir/projects" ] && rm -f "$dir/projects"
+  if [ -d "$shared" ] && [ ! -e "$dir/projects" ]; then
+    mv "$shared" "$dir/projects"
+    ok "Restored session history to $dir/projects"
+  fi
+}
+
+next_member_name() {  # $1 = client: first free <client>-N (N >= 2)
+  local n=2
+  while [ -d "$CLIENTS_PARENT/$1-$n" ] || grep -qxF "$CLIENTS_PARENT/$1-$n" "$(pool_file "$1")" 2>/dev/null; do
+    n=$((n + 1))
+  done
+  printf '%s-%s' "$1" "$n"
+}
+
+logged_in() {  # $1 = config dir: 0 if this dir holds a completed login
+  [ -f "$1/.credentials.json" ] && return 0
+  grep -qs '"oauthAccount"' "$1/.claude.json" && return 0
+  return 1
+}
+
+print_pool() {  # $1 = client: list members, order, login state
+  local pf; pf="$(pool_file "$1")" || return 1
+  [ -f "$pf" ] || return 1
+  local dir first=1 tag state
+  while IFS= read -r dir; do
+    case "$dir" in ''|\#*) continue ;; esac
+    [ "$first" -eq 1 ] && tag="(primary)" || tag=""
+    first=0
+    if [ ! -d "$dir" ]; then
+      printf "  ${RED}✗${RESET} %-16s ${DIM}%s${RESET} MISSING ON DISK\n" "$(basename "$dir")" "$dir"
+      continue
+    fi
+    if logged_in "$dir"; then state="${GREEN}logged in${RESET}"; else state="${RED}NO CREDENTIALS${RESET}"; fi
+    printf "  ${GREEN}●${RESET} %-16s ${DIM}%-40s${RESET} %b %s\n" "$(basename "$dir")" "$dir" "$state" "$tag"
+    if ! logged_in "$dir"; then
+      info "    log in with: CLAUDE_CONFIG_DIR=$dir command claude   (then /login, sign into that account, exit)"
+    fi
+  done < "$pf"
+}
+
 finish() {  # tell the user how/whether the shell got reloaded
   if [ "${CLAUDE_SESSION_WRAPPED:-0}" = "1" ]; then
     printf "\n${GREEN}Done.${RESET} Shell reloaded automatically.\n"
@@ -200,6 +338,7 @@ cmd_create() {
   hdr "Creating clients: ${NAMES[*]}"
   install_skill
   install_cli
+  install_rotate
   local setup; setup="$(find_setup)" || die "setup.sh not found"
   local n
   for n in "${NAMES[@]}"; do
@@ -215,10 +354,31 @@ cmd_create() {
 cmd_delete() {
   [ "${#NAMES[@]}" -gt 0 ] || die "Usage: claude-session --delete <name> [name...]"
   hdr "Deleting clients: ${NAMES[*]}"
-  local n dir
+  local n dir pf d
   for n in "${NAMES[@]}"; do
     [ -n "$n" ] || continue
     dir="$CLIENTS_PARENT/$n"
+    if [ -f "$dir/$POOL_MARKER" ]; then
+      warn "'$n' is a rotation pool member — remove it with: claude-session --pool-remove $n"
+      continue
+    fi
+    pf="$(pool_file "$n")"
+    if [ -f "$pf" ]; then
+      warn "'$n' has a rotation pool: this deletes the primary, EVERY pool account,"
+      warn "and the pool's shared session history."
+      if confirm "Delete client '$n' and its whole pool?"; then
+        while IFS= read -r d; do
+          case "$d" in ''|\#*) continue ;; esac
+          [ "$d" = "$dir" ] && continue
+          [ -d "$d" ] && { rm -rf "$d"; ok "Removed pool member ${d##*/}"; }
+        done < "$pf"
+        rm -rf "$(pool_projects "$n")"; rm -f "$pf"
+        rm -rf "$dir"; ok "Removed $dir (pool + shared history included)"
+      else
+        warn "Skipped $n"
+      fi
+      continue
+    fi
     if [ -d "$dir" ]; then
       if confirm "Delete $dir? (removes that account's local login + history)"; then
         rm -rf "$dir"; ok "Removed $dir"
@@ -245,6 +405,120 @@ cmd_list() {
   fi
 }
 
+cmd_pool_add() {
+  [ "${#NAMES[@]}" -eq 1 ] || die "Usage: claude-session --pool-add <client>"
+  local client="${NAMES[0]}" primary_dir pf setup
+  primary_dir="$CLIENTS_PARENT/$client"
+  [ -f "$primary_dir/$POOL_MARKER" ] && die "'$client' is itself a pool member (of $(cat "$primary_dir/$POOL_MARKER")). Pool-add the primary client instead."
+  { [ -f "$primary_dir/CLAUDE.md" ] && grep -qF "$SENTINEL_BEGIN" "$primary_dir/CLAUDE.md" 2>/dev/null; } \
+    || die "No bootstrapped client '$client' at $primary_dir — create it first: claude-session --create $client"
+
+  hdr "Adding a rotation account to '$client'"
+  install_skill
+  install_cli
+  install_rotate
+  setup="$(find_setup)" || die "setup.sh not found"
+
+  # First --pool-add for this client: create the pool around the primary.
+  mkdir -p "$POOLS_DIR"
+  pf="$(pool_file "$client")"
+  if [ ! -f "$pf" ]; then
+    printf '%s\n' "$primary_dir" > "$pf"
+    add "Created pool: $pf (primary: $client)"
+  else
+    ok "Pool exists: $pf"
+  fi
+  share_projects "$primary_dir" "$client"
+  wire_hook "$primary_dir"
+
+  # New member: next free <client>-N, bootstrapped like any config dir.
+  local member member_dir
+  member="$(next_member_name "$client")"
+  member_dir="$CLIENTS_PARENT/$member"
+  printf "\n${BOLD}• %s${RESET} (new pool member)\n" "$member"
+  env -u CLAUDE_CONFIG_DIR bash "$setup" --client "$member" --clients-parent "$CLIENTS_PARENT" --shared-dir "$SHARED_DIR"
+  printf '%s\n' "$client" > "$member_dir/$POOL_MARKER"
+  wire_hook "$member_dir"
+  share_projects "$member_dir" "$client"
+  grep -qxF "$member_dir" "$pf" || printf '%s\n' "$member_dir" >> "$pf"
+  ok "Added $member to the pool (rotation order = pool file order)"
+
+  hdr "Shell launchers"
+  rebuild_launchers
+
+  # Log the new account in. The login IS the connection: signing in inside
+  # this dir binds the new subscription to it, isolated from every other dir.
+  hdr "Log in the new account"
+  info "Sign into the NEW subscription — not the one '$client' already uses."
+  info "If the browser auto-picks your usual account, switch accounts on the OAuth page."
+  if command -v claude >/dev/null 2>&1 && { : </dev/tty; } 2>/dev/null \
+     && confirm "Launch claude under $member now to log in?"; then
+    info "In the session: run /login if not prompted, complete the browser sign-in, then exit."
+    CLAUDE_CONFIG_DIR="$member_dir" command claude || true
+  else
+    warn "Log in later with:"
+    info "  CLAUDE_CONFIG_DIR=$member_dir command claude   (then /login, sign in, exit)"
+  fi
+
+  hdr "Pool status for '$client'"
+  print_pool "$client"
+  info "cc-$client now rotates automatically: it starts on the primary and switches"
+  info "to the next logged-in account when a rate limit is hit, resuming the session."
+  finish
+}
+
+cmd_pool_list() {
+  [ "${#NAMES[@]}" -eq 1 ] || die "Usage: claude-session --pool-list <client>"
+  local client="${NAMES[0]}"
+  hdr "Rotation pool for '$client'"
+  if [ -f "$(pool_file "$client")" ]; then
+    print_pool "$client"
+  else
+    info "no pool — cc-$client is single-account. Create one with: claude-session --pool-add $client"
+  fi
+}
+
+cmd_pool_remove() {
+  [ "${#NAMES[@]}" -gt 0 ] || die "Usage: claude-session --pool-remove <member> [member...]"
+  local m dir client pf remaining
+  for m in "${NAMES[@]}"; do
+    [ -n "$m" ] || continue
+    dir="$CLIENTS_PARENT/$m"
+    if [ ! -f "$dir/$POOL_MARKER" ]; then
+      if [ -f "$(pool_file "$m")" ]; then
+        err "'$m' is a pool PRIMARY, not a member. Remove its members one by one"
+        err "(the pool disbands when the last member goes), or delete the whole"
+        die "client with: claude-session --delete $m"
+      fi
+      warn "'$m' is not a pool member — skipping"
+      continue
+    fi
+    client="$(cat "$dir/$POOL_MARKER")"
+    pf="$(pool_file "$client")"
+    if confirm "Remove $m from '$client's pool and DELETE $dir? (removes that account's local login)"; then
+      if [ -f "$pf" ]; then
+        local tmp; tmp="$(mktemp)"
+        grep -vxF "$dir" "$pf" > "$tmp" || true
+        mv "$tmp" "$pf"
+      fi
+      rm -rf "$dir"
+      ok "Removed $m"
+      remaining="$(grep -cv '^[[:space:]]*$' "$pf" 2>/dev/null || echo 0)"
+      if [ "$remaining" -le 1 ]; then
+        restore_projects "$CLIENTS_PARENT/$client" "$client"
+        rm -f "$pf"
+        ok "Pool disbanded — cc-$client is single-account again"
+        info "(the rate-limit hook stays in settings.json; it's inert without cc-rotate)"
+      fi
+    else
+      warn "Skipped $m"
+    fi
+  done
+  hdr "Shell launchers"
+  rebuild_launchers
+  finish
+}
+
 cmd_revert() {
   hdr "Revert"
   discover_dirs
@@ -257,6 +531,32 @@ cmd_revert() {
 
   apply_block "" || true
   ok "Removed launcher block ($RC_FILE) — bare 'claude' restored (backup: ${RC_FILE}.ccbak)"
+
+  # Rotation pools live inside SHARED_DIR (pool files + SHARED session history),
+  # so hand each pool's history back to its primary dir before deleting it.
+  if [ -d "$POOLS_DIR" ]; then
+    local pf client primary d had_pools=0
+    for pf in "$POOLS_DIR"/*.pool; do
+      [ -f "$pf" ] || continue
+      had_pools=1
+      client="$(basename "$pf" .pool)"
+      primary="$(grep -Em1 -v '^[[:space:]]*(#|$)' "$pf" || true)"
+      while IFS= read -r d; do
+        case "$d" in ''|\#*) continue ;; esac
+        [ "$d" = "$primary" ] && continue
+        if [ "$FORCE" -eq 1 ]; then
+          [ -d "$d" ] && { rm -rf "$d"; ok "Removed pool member (${d##*/})"; }
+        elif [ -L "$d/projects" ]; then
+          rm -f "$d/projects"; mkdir -p "$d/projects"
+        fi
+      done < "$pf"
+      [ -n "$primary" ] && [ -d "$primary" ] && restore_projects "$primary" "$client"
+    done
+    if [ "$FORCE" -eq 0 ] && [ "$had_pools" -eq 1 ]; then
+      warn "Kept pool member dirs (they hold real logins); their shared history went"
+      warn "back to each primary. Remove leftovers by hand if unwanted."
+    fi
+  fi
 
   [ -d "$DEST_SKILL" ] && { rm -rf "$DEST_SKILL"; ok "Removed installed skill ($DEST_SKILL)"; }
   # Removing SHARED_DIR also removes the global claude-session command living inside it.
@@ -281,5 +581,8 @@ case "$MODE" in
   create) cmd_create ;;
   delete) cmd_delete ;;
   list)   cmd_list ;;
+  pool-add)    cmd_pool_add ;;
+  pool-list)   cmd_pool_list ;;
+  pool-remove) cmd_pool_remove ;;
   revert) cmd_revert ;;
 esac

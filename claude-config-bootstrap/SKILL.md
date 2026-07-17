@@ -1,6 +1,6 @@
 ---
 name: claude-config-bootstrap
-description: Set up or repair an isolated per-client Claude Code config directory with a two-tier CLAUDE.md memory system (a shared global file imported into a client-local file), a client-aware statusline that labels which account or billing entity the session belongs to, and optional shell launcher functions (named cc-clientname) that set the config-dir environment variable automatically plus neuter the bare claude command. Use this skill whenever the user wants to configure a new client or work config dir, add shared-plus-local memory across multiple Claude Code accounts, stop sessions from looking identical in the footer, set up per-client launch commands so they don't have to export the config-dir variable by hand, fix a config dir that's missing the shared import or statusline, or asks to "set up this Claude", "bootstrap my config", or "run the client setup". Safe and idempotent — re-running only changes what's missing or has drifted, so reach for it even when unsure whether a dir is already configured.
+description: Set up or repair an isolated per-client Claude Code config directory with a two-tier CLAUDE.md memory system (a shared global file imported into a client-local file), a client-aware statusline that labels which account or billing entity the session belongs to, and optional shell launcher functions (named cc-clientname) that set the config-dir environment variable automatically plus neuter the bare claude command. Also covers rate-limit rotation pools — adding extra accounts to a client so its cc- launcher automatically fails over to the next account when a rate limit is hit and resumes the same conversation. Use this skill whenever the user wants to configure a new client or work config dir, add shared-plus-local memory across multiple Claude Code accounts, stop sessions from looking identical in the footer, set up per-client launch commands so they don't have to export the config-dir variable by hand, fix a config dir that's missing the shared import or statusline, add a second account or subscription to rotate on rate limits, keep working when they "hit the usage limit", or asks to "set up this Claude", "bootstrap my config", or "run the client setup". Safe and idempotent — re-running only changes what's missing or has drifted, so reach for it even when unsure whether a dir is already configured.
 ---
 
 # Claude Config Bootstrap
@@ -42,6 +42,32 @@ If `--client` is omitted, the script derives a sensible label from the config di
 **Step 3 — Verify.** Tell the user to confirm inside Claude Code:
 - Run `/memory` — it lists the loaded memory files and their sources. The shared `global.md` should appear in the tree, proving the import resolved.
 - **Restart the session** to pick up the statusline (statusline changes load at startup), then check the footer shows the client label.
+
+## Rate-limit rotation pools (handled by the `claude-session` CLI)
+
+A client can hold a **rotation pool** of extra accounts (each its own
+subscription). With a pool, the `cc-<client>` launcher routes through the
+`scripts/cc-rotate` supervisor: when the active account hits its rate limit, a
+`StopFailure` hook fires, the supervisor relaunches `claude` under the next
+account in the pool, and resumes the same conversation with `--resume`.
+Session history is shared across the pool's dirs via symlinks so the resume
+always finds the transcript.
+
+When the user asks to add a rotation account, rotate on rate limits, or keep
+working past a usage limit, run (from anywhere, once installed):
+
+```bash
+claude-session --pool-add <client>     # creates <client>-2, walks through login
+claude-session --pool-list <client>    # members, order, login state
+claude-session --pool-remove <name>    # remove a member; last removal disbands
+```
+
+Two things to tell the user every time:
+1. The new member must be logged into a **different** subscription than the
+   primary (the `/login` at the end of `--pool-add` is where that happens).
+2. This rotates the user's **own** accounts via the genuine claude binary — no
+   token extraction or proxying — but rotating to extend usage is a gray area
+   in Anthropic's terms; keep it to human-paced, interactive use.
 
 ## Shell launchers (handled by the `claude-session` CLI)
 

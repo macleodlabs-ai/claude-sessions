@@ -185,6 +185,57 @@ Shell launchers, deletion, and revert are the `claude-session` CLI's job — see
 
 ---
 
+## Rate-limit rotation pools (mechanics)
+
+The repo's `claude-session` CLI can give a client a **rotation pool** — sibling
+accounts it fails over to on a rate limit, resuming the same conversation. The
+skill ships the two runtime pieces; the CLI wires them. Full user-facing
+walkthrough is in the repo README; this section is the reference.
+
+**Files:**
+
+| Piece | Path | Purpose |
+|---|---|---|
+| Supervisor | `~/.claude-shared/cc-rotate` | Launches `claude` per pool dir; on the rotate signal relaunches the next dir with `--resume <session-id>` |
+| Hook helper | `~/.claude-shared/cc-rotate-kill` | `StopFailure` hook target; signals the supervisor and TERMs claude |
+| Pool file | `~/.claude-shared/pools/<client>.pool` | Ordered list of config-dir paths — rotation order, primary first |
+| Shared history | `~/.claude-shared/pools/<client>-projects/` | The pool's one real `projects/` dir; every member's `projects` is a symlink to it |
+| Member marker | `<member-dir>/.ccb-pool-member` | Contains the primary's name; tells the CLI this dir is a pool member, not a standalone client (no `cc-` launcher is generated for it) |
+
+**Detection.** Each pool dir's `settings.json` gets a `hooks.StopFailure` block
+with matchers `rate_limit` and `billing_error` pointing at `cc-rotate-kill`
+(merged via `jq` when the file exists; the script prints the snippet to add by
+hand if `jq` is missing — same policy as the statusline). `StopFailure` fires
+on the structured API error, so there are no false positives from chat text
+that merely mentions rate limits.
+
+**The gate.** `cc-rotate-kill` is a silent no-op unless `CC_ROTATE_ACTIVE=1`
+and a live supervisor pid file are present in the environment — both are set
+only by `cc-rotate`. So the hook is harmless when a pool dir is launched
+directly (e.g. for `/login`), and plain `cc-<client>` sessions without a pool
+never rotate.
+
+**Why the history symlinks are load-bearing.** `claude --resume <id>` looks the
+transcript up under the *active* config dir's `projects/`. Without the shared
+dir, switching accounts means `No conversation found with session ID`. The CLI
+therefore moves the primary's existing `projects/` into the pool's shared
+location on first `--pool-add` (merge, never delete) and symlinks every member
+to it. Transcripts carry no account binding, so any member can replay them.
+A resume can mint a new session UUID, which is why the supervisor re-reads the
+newest `.jsonl` filename after every rotation rather than trusting the old id.
+
+**Failure policy.** Pool exhausted → red stderr, non-zero exit, and a manual
+`claude --resume` command you can run by hand later. A non-rate-limit exit
+(user quits, crash) passes straight through with claude's own exit code.
+
+**Teardown symmetry.** `--pool-remove` of the last member, `--delete` of a
+pooled primary, and `--revert` all restore or intentionally delete the shared
+history — `--revert` moves it back into the primary dir *before* removing
+`~/.claude-shared`, so no transcripts are lost. The `StopFailure` hook is left
+in `settings.json` after a disband (it's inert without the supervisor).
+
+---
+
 ## Why nest under `~/.claude-clients/` instead of `~/.claude/`
 
 Putting client dirs *inside* `~/.claude/` technically works, but couples them to the one directory most likely to be wiped or scanned: `~/.claude` is the default account's home, and `rm -rf ~/.claude` or usage tools globbing `~/.claude/projects/` would sweep up all your clients and merge their histories across billing entities. A sibling directory (`~/.claude-clients/`) keeps the default account cleanly separate and out of the blast radius. That's the layout this tool defaults to.
@@ -243,7 +294,9 @@ claude-config-bootstrap/
 ├── SKILL.md              # Agent-facing trigger doc (used by Claude Code's skill system)
 ├── README.md            # This file (human-facing reference)
 └── scripts/
-    └── setup.sh         # The idempotent setup script — the whole tool
+    ├── setup.sh         # The idempotent per-config-dir setup script
+    ├── cc-rotate        # Rotation supervisor (installed to ~/.claude-shared by the CLI)
+    └── cc-rotate-kill   # StopFailure hook helper (installed alongside it)
 ```
 
-`SKILL.md` is what Claude reads to decide when to run this; `README.md` is for you. Both describe the same `setup.sh`.
+`SKILL.md` is what Claude reads to decide when to run this; `README.md` is for you. `setup.sh` configures one config dir; the `cc-rotate` pair powers the optional rate-limit rotation pools managed by the `claude-session` CLI.
