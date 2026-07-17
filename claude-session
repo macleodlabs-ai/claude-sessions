@@ -13,6 +13,7 @@
 #   claude-session --pool-add macleod         # add a rotation account to a client
 #   claude-session --pool-list macleod        # show a client's rotation pool
 #   claude-session --pool-remove macleod-2    # remove a rotation account
+#   claude-session --login macleod-2          # (re)log in an account by name
 #   claude-session --revert                   # remove all tooling (keep accounts)
 #   claude-session --revert --force           # also delete every client account dir
 #
@@ -28,6 +29,10 @@
 #   --pool-remove NAME   Remove pool member NAME (e.g. macleod-2) and delete its dir.
 #                        Removing the last member disbands the pool (single-account
 #                        behavior and private history are restored).
+#   --login NAME...      Launch claude under NAME's config dir to log it in — no
+#                        CLAUDE_CONFIG_DIR to remember. NAME is any client or pool
+#                        member; a pooled client name logs in every member that
+#                        still has no credentials.
 #   --revert             Remove rc launchers, the global command, and ~/.claude-shared.
 #                        Client account dirs are kept; pooled session history is
 #                        restored to each client's primary dir first.
@@ -76,7 +81,7 @@ fi
 
 # --- arg parsing -----------------------------------------------------------
 MODE=""; FORCE=0; ASSUME_YES=0; declare -a NAMES=()
-print_help() { sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; }
+print_help() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; }
 sanitize() { printf '%s' "$1" | tr -cd '[:alnum:]_-'; }
 
 while [ $# -gt 0 ]; do
@@ -87,6 +92,7 @@ while [ $# -gt 0 ]; do
     --pool-add)    MODE="pool-add"; shift ;;
     --pool-list)   MODE="pool-list"; shift ;;
     --pool-remove) MODE="pool-remove"; shift ;;
+    --login)       MODE="login"; shift ;;
     --revert) MODE="revert"; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     --force)  FORCE=1; ASSUME_YES=1; shift ;;
@@ -303,6 +309,30 @@ logged_in() {  # $1 = config dir: 0 if this dir holds a completed login
   return 1
 }
 
+can_login_here() {  # interactive login possible? (claude on PATH + a real tty)
+  command -v claude >/dev/null 2>&1 || return 1
+  { : </dev/tty; } 2>/dev/null || return 1
+  return 0
+}
+
+login_dir() {  # $1 = config dir: launch claude there so the user can /login
+  local dir="$1" label="${1##*/}"
+  if [ -f "$dir/$POOL_MARKER" ]; then
+    info "Sign '$label' into a DIFFERENT subscription than '$(cat "$dir/$POOL_MARKER")' already uses."
+    info "If the browser auto-picks your usual account, switch accounts on the OAuth page."
+  fi
+  if can_login_here; then
+    info "Launching claude under $label — run /login if not prompted, sign in, then exit."
+    CLAUDE_CONFIG_DIR="$dir" command claude || true
+    if logged_in "$dir"; then ok "$label is logged in"
+    else warn "$label still has no credentials — retry with: claude-session --login $label"; fi
+  else
+    warn "Can't launch claude interactively here (needs claude on PATH and a terminal)."
+    info "From a terminal: claude-session --login $label"
+    info "  (equivalent: CLAUDE_CONFIG_DIR=$dir command claude, then /login)"
+  fi
+}
+
 print_pool() {  # $1 = client: list members, order, login state
   local pf; pf="$(pool_file "$1")" || return 1
   [ -f "$pf" ] || return 1
@@ -318,7 +348,7 @@ print_pool() {  # $1 = client: list members, order, login state
     if logged_in "$dir"; then state="${GREEN}logged in${RESET}"; else state="${RED}NO CREDENTIALS${RESET}"; fi
     printf "  ${GREEN}●${RESET} %-16s ${DIM}%-40s${RESET} %b %s\n" "$(basename "$dir")" "$dir" "$state" "$tag"
     if ! logged_in "$dir"; then
-      info "    log in with: CLAUDE_CONFIG_DIR=$dir command claude   (then /login, sign into that account, exit)"
+      info "    log in with: claude-session --login $(basename "$dir")"
     fi
   done < "$pf"
 }
@@ -449,15 +479,10 @@ cmd_pool_add() {
   # Log the new account in. The login IS the connection: signing in inside
   # this dir binds the new subscription to it, isolated from every other dir.
   hdr "Log in the new account"
-  info "Sign into the NEW subscription — not the one '$client' already uses."
-  info "If the browser auto-picks your usual account, switch accounts on the OAuth page."
-  if command -v claude >/dev/null 2>&1 && { : </dev/tty; } 2>/dev/null \
-     && confirm "Launch claude under $member now to log in?"; then
-    info "In the session: run /login if not prompted, complete the browser sign-in, then exit."
-    CLAUDE_CONFIG_DIR="$member_dir" command claude || true
+  if can_login_here && confirm "Launch claude under $member now to log in?"; then
+    login_dir "$member_dir"
   else
-    warn "Log in later with:"
-    info "  CLAUDE_CONFIG_DIR=$member_dir command claude   (then /login, sign in, exit)"
+    warn "Log in later with: claude-session --login $member"
   fi
 
   hdr "Pool status for '$client'"
@@ -465,6 +490,40 @@ cmd_pool_add() {
   info "cc-$client now rotates automatically: it starts on the primary and switches"
   info "to the next logged-in account when a rate limit is hit, resuming the session."
   finish
+}
+
+cmd_login() {
+  [ "${#NAMES[@]}" -gt 0 ] || die "Usage: claude-session --login <client-or-member> [name...]"
+  local n dir pf d queued targets=()
+  for n in "${NAMES[@]}"; do
+    [ -n "$n" ] || continue
+    dir="$CLIENTS_PARENT/$n"
+    pf="$(pool_file "$n")"
+    if [ -f "$pf" ]; then
+      # Pooled client: log in every member that still needs credentials.
+      queued=0
+      while IFS= read -r d; do
+        case "$d" in ''|\#*) continue ;; esac
+        [ -d "$d" ] || continue
+        logged_in "$d" || { targets+=("$d"); queued=1; }
+      done < "$pf"
+      [ "$queued" -eq 0 ] && ok "All accounts in '$n's pool are already logged in"
+    elif [ -d "$dir" ]; then
+      targets+=("$dir")
+    else
+      warn "No client or pool member '$n' at $dir — skipping"
+    fi
+  done
+  [ "${#targets[@]}" -gt 0 ] || return 0
+
+  hdr "Login"
+  for d in "${targets[@]}"; do
+    if logged_in "$d"; then
+      confirm "'${d##*/}' is already logged in — log in again (e.g. to switch its account)?" \
+        || { warn "Skipped ${d##*/}"; continue; }
+    fi
+    login_dir "$d"
+  done
 }
 
 cmd_pool_list() {
@@ -584,5 +643,6 @@ case "$MODE" in
   pool-add)    cmd_pool_add ;;
   pool-list)   cmd_pool_list ;;
   pool-remove) cmd_pool_remove ;;
+  login)       cmd_login ;;
   revert) cmd_revert ;;
 esac

@@ -131,11 +131,12 @@ of `--pool-add` you land in Claude Code under the new dir:
 3. Exit Claude. Done — credentials live in `~/.claude-clients/macleod-2`,
    isolated exactly like your other clients.
 
-Quit before finishing, or want to re-login later? No need to re-create
-anything:
+Quit before finishing, or want to re-login later? No config dir to remember —
+just name the account:
 
 ```bash
-CLAUDE_CONFIG_DIR=~/.claude-clients/macleod-2 command claude   # then /login
+claude-session --login macleod-2   # relaunch the login for one account
+claude-session --login macleod     # log in EVERY pool member still missing credentials
 ```
 
 ### Daily use
@@ -153,6 +154,7 @@ red message, soonest-reset hint, non-zero exit — never a silent fallback.
 ```bash
 claude-session --pool-add macleod      # add another account (macleod-3, ...)
 claude-session --pool-list macleod     # members, rotation order, login state
+claude-session --login macleod-2       # (re)log in an account by name
 claude-session --pool-remove macleod-2 # remove an account (prompts first)
 ```
 
@@ -217,7 +219,7 @@ If the footer is blank or wrong, quit and relaunch with `cc-<client>`.
 | Footer didn't change after setup | Quit Claude and relaunch with `cc-<client>` |
 | Rotation didn't fire on a rate limit | Check the pool member's `settings.json` has the `StopFailure` hook and that you launched via `cc-<client>` (direct `claude` runs never rotate — that's the safety gate) |
 | `No conversation found with session ID` after a switch | The pool dirs must share history — `claude-session --pool-list <client>` should show every member; re-run `--pool-add` wiring by checking each dir's `projects` is a symlink into `~/.claude-shared/pools/` |
-| Pool member shows `NO CREDENTIALS` | `CLAUDE_CONFIG_DIR=~/.claude-clients/<member> command claude`, then `/login` |
+| Pool member shows `NO CREDENTIALS` | `claude-session --login <member>`, then `/login` inside the session |
 
 ---
 

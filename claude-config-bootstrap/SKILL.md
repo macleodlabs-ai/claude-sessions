@@ -59,6 +59,8 @@ working past a usage limit, run (from anywhere, once installed):
 ```bash
 claude-session --pool-add <client>     # creates <client>-2, walks through login
 claude-session --pool-list <client>    # members, order, login state
+claude-session --login <name>          # (re)log in an account by name; a pooled
+                                       # client name logs in every member missing creds
 claude-session --pool-remove <name>    # remove a member; last removal disbands
 ```
 
