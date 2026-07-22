@@ -61,8 +61,15 @@ trap '' INT   # Ctrl+C belongs to claude; we exit when it does
 SESSION_ID=""
 LAST_DIR=""
 STATUS=0
+WANT_RC=0
 for dir in "${DIRS[@]}"; do
   label="${dir##*/}"
+  # Tooling parity: MCP servers, plugins, and skills registered on the account
+  # we're leaving must exist on the one we're entering, or the resumed session
+  # comes back without its tools.
+  if [ -n "$LAST_DIR" ] && [ -x "${SHARED_DIR}/cc-pool-sync" ]; then
+    "${SHARED_DIR}/cc-pool-sync" "$LAST_DIR" "$dir" || warn "tooling sync failed — continuing anyway"
+  fi
   export CLAUDE_CONFIG_DIR="$dir"
   LAST_DIR="$dir"
 
@@ -81,6 +88,15 @@ for dir in "${DIRS[@]}"; do
     # reached" until the user types something. Sending a prompt starts the first
     # turn on the new account immediately.
     args+=("[cc-rotate] The previous account hit its rate limit mid-turn; you have been switched to a fresh account. Continue exactly where you left off.")
+    # Restore Remote Control if the dying session had it on. MUST come after the
+    # positional prompt: --remote-control takes an optional [name], so placed
+    # earlier it would swallow the prompt as its name.
+    if [ "$WANT_RC" -eq 1 ]; then
+      case " $* " in *" --remote-control"*) : ;; *)
+        note "restoring Remote Control (was active before the rotation)"
+        args+=(--remote-control) ;;
+      esac
+    fi
   fi
 
   rm -f "$ROTATE_FLAG"
@@ -105,6 +121,15 @@ for dir in "${DIRS[@]}"; do
   latest="$(ls -t "$PROJECTS"/*/*.jsonl 2>/dev/null | head -n 1 || true)"
   if [ -n "$latest" ]; then
     SESSION_ID="$(basename "$latest" .jsonl)"
+    # Was Remote Control on when the session died? The transcript logs bridge
+    # status lines; the last remote-control one tells us the final state.
+    if tail -c 2000000 "$latest" 2>/dev/null \
+        | grep '"subtype":"bridge_status"' | grep 'remote-control' | tail -n 1 \
+        | grep -q 'remote-control is active'; then
+      WANT_RC=1
+    else
+      WANT_RC=0
+    fi
   else
     warn "no transcript found under $PROJECTS — next account starts a fresh session"
     SESSION_ID=""

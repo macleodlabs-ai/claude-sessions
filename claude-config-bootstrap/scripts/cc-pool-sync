@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+#
+# cc-pool-sync — bring one pool member's tooling to parity with another.
+#
+# Rotation members are separate config dirs, so MCP servers, plugins, and
+# skills registered on one account silently don't exist on the others — after
+# a rate-limit rotation the resumed session loses its tools. This copies:
+#
+#   - MCP server definitions: global .mcpServers + every per-project
+#     .projects[*].mcpServers in .claude.json   (needs jq)
+#   - Plugins: installed_plugins.json, known_marketplaces.json (merged),
+#     marketplaces/<name> dirs not present in the target
+#   - skills/ agents/ commands/ dirs (entries not present in the target)
+#
+# Additive only: nothing the target already has is deleted; the source wins
+# on key conflicts. Caches, credentials, settings.json are never touched —
+# OAuth-backed MCP servers (e.g. Linear) still need a one-time /mcp
+# authenticate under the target account.
+#
+# Usage: cc-pool-sync <from-config-dir> <to-config-dir>
+
+set -uo pipefail
+
+if [ -t 2 ]; then
+  DIM=$'\033[2m'; RESET=$'\033[0m'; YELLOW=$'\033[33m'; CYAN=$'\033[36m'
+else DIM=""; RESET=""; YELLOW=""; CYAN=""; fi
+note() { printf "${CYAN}cc-pool-sync:${RESET} %s\n" "$1" >&2; }
+warn() { printf "${YELLOW}cc-pool-sync:${RESET} %s\n" "$1" >&2; }
+
+FROM="${1:-}"; TO="${2:-}"
+[ -d "$FROM" ] && [ -d "$TO" ] || { warn "usage: cc-pool-sync <from-config-dir> <to-config-dir> (both must exist)"; exit 2; }
+[ "$FROM" = "$TO" ] && exit 0
+
+# --- 1. MCP server definitions (.claude.json) --------------------------------
+if command -v jq >/dev/null 2>&1 && [ -f "$FROM/.claude.json" ]; then
+  tgt="$TO/.claude.json"
+  [ -f "$tgt" ] || printf '{}\n' > "$tgt"
+  tmp="$(mktemp)"
+  if jq --slurpfile src "$FROM/.claude.json" '
+        .mcpServers = ((.mcpServers // {}) * ($src[0].mcpServers // {})) |
+        .projects = (reduce (($src[0].projects // {}) | to_entries[]
+                             | select(.value.mcpServers != null and (.value.mcpServers | length > 0))) as $e
+          (.projects // {};
+           .[$e.key] = ((.[$e.key] // {})
+             | .mcpServers = ((.mcpServers // {}) * $e.value.mcpServers))))
+      ' "$tgt" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    mv "$tmp" "$tgt"
+    note "MCP server definitions synced (global + per-project)"
+  else
+    rm -f "$tmp"; warn "could not merge .claude.json mcpServers (invalid JSON?) — skipped"
+  fi
+else
+  [ -f "$FROM/.claude.json" ] && warn "jq not found — MCP definitions NOT synced"
+fi
+
+# --- 2. Plugins --------------------------------------------------------------
+if [ -d "$FROM/plugins" ]; then
+  mkdir -p "$TO/plugins/marketplaces"
+  for f in installed_plugins.json known_marketplaces.json; do
+    [ -f "$FROM/plugins/$f" ] || continue
+    if [ -f "$TO/plugins/$f" ] && command -v jq >/dev/null 2>&1; then
+      tmp="$(mktemp)"
+      if jq -s '.[0] * .[1]' "$TO/plugins/$f" "$FROM/plugins/$f" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        mv "$tmp" "$TO/plugins/$f"
+      else rm -f "$tmp"; warn "could not merge plugins/$f — left target as-is"; fi
+    else
+      cp "$FROM/plugins/$f" "$TO/plugins/$f"
+    fi
+  done
+  if [ -d "$FROM/plugins/marketplaces" ]; then
+    for m in "$FROM/plugins/marketplaces"/*/; do
+      [ -d "$m" ] || continue
+      name="$(basename "$m")"
+      [ -e "$TO/plugins/marketplaces/$name" ] || cp -R "$m" "$TO/plugins/marketplaces/$name"
+    done
+  fi
+  note "plugins synced (installed list + marketplaces)"
+fi
+
+# --- 3. skills / agents / commands -------------------------------------------
+for d in skills agents commands; do
+  [ -d "$FROM/$d" ] || continue
+  mkdir -p "$TO/$d"
+  synced=0
+  for entry in "$FROM/$d"/*; do
+    [ -e "$entry" ] || continue
+    name="$(basename "$entry")"
+    [ -e "$TO/$d/$name" ] || { cp -R "$entry" "$TO/$d/$name"; synced=$((synced + 1)); }
+  done
+  [ "$synced" -gt 0 ] && note "$d/: $synced entrie(s) synced"
+done
+
+note "${DIM}done — OAuth-backed MCP servers still need /mcp authenticate on the target account${RESET}"
+exit 0

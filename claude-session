@@ -225,7 +225,7 @@ install_rotate() {  # copy the supervisor + hook helper next to the CLI
   done
   [ -n "$src_dir" ] || die "cc-rotate scripts not found (run from the repo, or reinstall)"
   mkdir -p "$SHARED_DIR"
-  for f in cc-rotate cc-rotate-kill; do
+  for f in cc-rotate cc-rotate-kill cc-pool-sync; do
     if [ -f "$SHARED_DIR/$f" ] && cmp -s "$src_dir/$f" "$SHARED_DIR/$f"; then
       ok "$f already installed → $SHARED_DIR/$f"
     else
@@ -470,6 +470,11 @@ cmd_pool_add() {
   printf '%s\n' "$client" > "$member_dir/$POOL_MARKER"
   wire_hook "$member_dir"
   share_projects "$member_dir" "$client"
+  # Tooling parity: the new member inherits the primary's MCP servers, plugins,
+  # and skills, so a rotation onto it doesn't lose tools mid-session.
+  if [ -x "$SHARED_DIR/cc-pool-sync" ]; then
+    "$SHARED_DIR/cc-pool-sync" "$primary_dir" "$member_dir" || warn "tooling sync failed — run by hand: $SHARED_DIR/cc-pool-sync $primary_dir $member_dir"
+  fi
   grep -qxF "$member_dir" "$pf" || printf '%s\n' "$member_dir" >> "$pf"
   ok "Added $member to the pool (rotation order = pool file order)"
 
