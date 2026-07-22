@@ -74,6 +74,14 @@ for dir in "${DIRS[@]}"; do
     note "launching on ${BOLD}${label}${RESET}"
   fi
   args+=("$@")
+  if [ -n "$SESSION_ID" ]; then
+    # Auto-submit a turn on rotation resumes. A bare `--resume` only renders the
+    # old transcript — whose tail is the previous account's rate-limit failure —
+    # and then waits for input, so the fresh account looks stalled on "limit
+    # reached" until the user types something. Sending a prompt starts the first
+    # turn on the new account immediately.
+    args+=("[cc-rotate] The previous account hit its rate limit mid-turn; you have been switched to a fresh account. Continue exactly where you left off.")
+  fi
 
   rm -f "$ROTATE_FLAG"
   command claude "${args[@]}" &

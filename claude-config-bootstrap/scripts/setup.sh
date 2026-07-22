@@ -256,6 +256,8 @@ if [ "$INSTALL_STATUSLINE" -eq 1 ]; then
 #!/usr/bin/env bash
 # Client-aware statusline. Reads CLAUDE_CONFIG_DIR (inherited from the shell that
 # launched claude) to label which client/billing entity this session belongs to.
+# Appends usage: context-window %, 5h/7d rate-limit % (with reset time when hot),
+# session cost, and lines added/removed (fields present since CC 2.1.x).
 input=$(cat)
 
 cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
@@ -269,17 +271,51 @@ case "$label" in
   *)        tag=$'\033[1;36m'"● ${label}"$'\033[0m' ;;
 esac
 
+model="?"; dir=""; ctx=""; five=""; five_reset=""; seven=""; cost=""; added=""; removed=""
 if command -v jq >/dev/null 2>&1; then
-  model=$(printf '%s' "$input" | jq -r '.model.display_name // "?"')
-  dir=$(printf '%s' "$input" | jq -r '.workspace.current_dir // .cwd // ""')
-else
-  model="?"; dir=""
+  IFS=$'\t' read -r model dir ctx five five_reset seven cost added removed < <(printf '%s' "$input" | jq -r '[
+    (.model.display_name // "?"),
+    (.workspace.current_dir // .cwd // ""),
+    (.context_window.used_percentage // -1 | round),
+    (.rate_limits.five_hour.used_percentage // -1 | round),
+    (.rate_limits.five_hour.resets_at // 0),
+    (.rate_limits.seven_day.used_percentage // -1 | round),
+    (.cost.total_cost_usd // -1),
+    (.cost.total_lines_added // 0),
+    (.cost.total_lines_removed // 0)
+  ] | @tsv')
 fi
 [ -n "$dir" ] && base=$(basename "$dir") || base="?"
 branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
 
+# green <50, yellow 50-79, red >=80
+pct_paint() {
+  if [ "$1" -ge 80 ]; then printf '\033[1;31m%s%%\033[0m' "$1"
+  elif [ "$1" -ge 50 ]; then printf '\033[33m%s%%\033[0m' "$1"
+  else printf '\033[32m%s%%\033[0m' "$1"; fi
+}
+
 printf '%s \033[2m│\033[0m %s \033[2m│\033[0m 📁 %s' "$tag" "$model" "$base"
 [ -n "$branch" ] && printf ' \033[2m│\033[0m 🌿 %s' "$branch"
+
+if [ -n "$ctx" ] && [ "$ctx" -ge 0 ] 2>/dev/null; then
+  printf ' \033[2m│\033[0m 🧠 '; pct_paint "$ctx"
+fi
+
+if [ -n "$five" ] && [ "$five" -ge 0 ] 2>/dev/null; then
+  printf ' \033[2m│\033[0m ⏳ 5h '; pct_paint "$five"
+  # show when the 5h window resets once it's running hot (the rotation-pool signal)
+  if [ "$five" -ge 80 ] && [ "$five_reset" -gt 0 ] 2>/dev/null; then
+    printf '\033[2m→%s\033[0m' "$(date -r "$five_reset" +%H:%M 2>/dev/null)"
+  fi
+  if [ -n "$seven" ] && [ "$seven" -ge 0 ] 2>/dev/null; then
+    printf ' \033[2m·\033[0m 7d '; pct_paint "$seven"
+  fi
+fi
+
+if [ -n "$cost" ] && [ "$cost" != "-1" ]; then
+  printf ' \033[2m│\033[0m \033[2m$%.2f +%s/-%s\033[0m' "$cost" "$added" "$removed"
+fi
 printf '\n'
 SL
       chmod +x "$STATUSLINE_SCRIPT"
