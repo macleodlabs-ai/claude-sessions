@@ -151,6 +151,23 @@ conversation resumes automatically (the statusline label shows which account
 is active). When **every** account in the pool is limited it fails loud —
 red message, soonest-reset hint, non-zero exit — never a silent fallback.
 
+The switch is seamless by design:
+
+- **No stall** — the supervisor submits a continuation prompt on resume, so
+  the new account picks the task straight back up (previously the resumed
+  session just displayed the old transcript — ending in the rate-limit error —
+  and sat waiting until you typed `continue`).
+- **Remote Control survives** — if `/remote-control` was active when the
+  limit hit, the relaunch passes `--remote-control` and re-pairs automatically.
+- **Tools survive** — `skills/`, `plugins/`, `agents/`, and `commands/` are
+  shared across the pool via symlinks (exactly like session history), so
+  anything added mid-session on one account is instantly available on all of
+  them. MCP server *definitions* live inside each account's `.claude.json`
+  next to its login state, so they're synced instead of shared: on every
+  rotation, at `--pool-add`, and via a `SessionEnd` hook whenever any session
+  closes. OAuth-backed MCP servers (e.g. Linear) still need a one-time `/mcp`
+  authenticate on each account.
+
 ```bash
 claude-session --pool-add macleod      # add another account (macleod-3, ...)
 claude-session --pool-list macleod     # members, rotation order, login state
@@ -198,6 +215,23 @@ Never edit between the `:begin` / `:end` markers — that block is auto-managed.
 
 ---
 
+## The footer
+
+The statusline labels every session and carries live usage:
+
+```
+● macleod │ Fable 5 │ 📁 growthOS │ 🌿 main │ 🧠 10% │ ⏳ 5h 7% · 7d 1% │ $7.25 +445/-2
+```
+
+- 🧠 context-window used · ⏳ 5-hour and 7-day rate-limit windows — green
+  <50%, yellow 50–79%, red ≥80%; the 5h segment shows its reset time once
+  it's hot (your early warning before a rotation)
+- session cost and lines added/removed, dimmed
+- Usage comes straight from Claude Code's statusline feed (2.1.x+); on older
+  versions those segments simply don't render.
+
+---
+
 ## Check it's working
 
 Inside a session:
@@ -220,6 +254,8 @@ If the footer is blank or wrong, quit and relaunch with `cc-<client>`.
 | Rotation didn't fire on a rate limit | Check the pool member's `settings.json` has the `StopFailure` hook and that you launched via `cc-<client>` (direct `claude` runs never rotate — that's the safety gate) |
 | `No conversation found with session ID` after a switch | The pool dirs must share history — `claude-session --pool-list <client>` should show every member; re-run `--pool-add` wiring by checking each dir's `projects` is a symlink into `~/.claude-shared/pools/` |
 | Pool member shows `NO CREDENTIALS` | `claude-session --login <member>`, then `/login` inside the session |
+| Resumed session lost MCP servers / plugins after a switch | The pool predates tooling sharing — run `~/.claude-shared/cc-pool-sync <primary-dir> <member-dir>` once per member (pools created by the current `--pool-add` get sharing automatically) |
+| An OAuth MCP server (e.g. Linear) shows disconnected on one account | Expected — logins are per account. Open `/mcp` there and authenticate once |
 
 ---
 
