@@ -1,23 +1,31 @@
 #!/usr/bin/env bash
 #
-# cc-pool-sync — bring one pool member's tooling to parity with another.
+# cc-pool-sync — bring pool members' tooling to parity.
 #
 # Rotation members are separate config dirs, so MCP servers, plugins, and
 # skills registered on one account silently don't exist on the others — after
-# a rate-limit rotation the resumed session loses its tools. This copies:
+# a rate-limit rotation the resumed session loses its tools.
 #
-#   - MCP server definitions: global .mcpServers + every per-project
-#     .projects[*].mcpServers in .claude.json   (needs jq)
-#   - Plugins: installed_plugins.json, known_marketplaces.json (merged),
-#     marketplaces/<name> dirs not present in the target
-#   - skills/ agents/ commands/ dirs (entries not present in the target)
+# Two modes:
+#
+#   cc-pool-sync <from-config-dir> <to-config-dir>
+#       Full additive sync: MCP server definitions (global + per-project
+#       .claude.json, needs jq), plugins (installed list + marketplaces),
+#       and skills/agents/commands dir entries. Used by cc-rotate at
+#       rotation time and by claude-session --pool-add. (Once a pool is on
+#       shared symlinked tooling, the dir copies become no-ops and only the
+#       MCP merge does work.)
+#
+#   cc-pool-sync --push-mcp
+#       Hook mode (wired as a SessionEnd hook): push THIS config dir's MCP
+#       definitions to every other member of its pool, so servers added
+#       mid-session exist everywhere before the next launch or rotation.
+#       Reads CLAUDE_CONFIG_DIR; silently no-ops outside a pool.
 #
 # Additive only: nothing the target already has is deleted; the source wins
 # on key conflicts. Caches, credentials, settings.json are never touched —
 # OAuth-backed MCP servers (e.g. Linear) still need a one-time /mcp
-# authenticate under the target account.
-#
-# Usage: cc-pool-sync <from-config-dir> <to-config-dir>
+# authenticate under each account.
 
 set -uo pipefail
 
@@ -27,16 +35,19 @@ else DIM=""; RESET=""; YELLOW=""; CYAN=""; fi
 note() { printf "${CYAN}cc-pool-sync:${RESET} %s\n" "$1" >&2; }
 warn() { printf "${YELLOW}cc-pool-sync:${RESET} %s\n" "$1" >&2; }
 
-FROM="${1:-}"; TO="${2:-}"
-[ -d "$FROM" ] && [ -d "$TO" ] || { warn "usage: cc-pool-sync <from-config-dir> <to-config-dir> (both must exist)"; exit 2; }
-[ "$FROM" = "$TO" ] && exit 0
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SHARED_DIR="${SHARED_DIR:-$SCRIPT_DIR}"
+POOLS_DIR="${SHARED_DIR}/pools"
 
-# --- 1. MCP server definitions (.claude.json) --------------------------------
-if command -v jq >/dev/null 2>&1 && [ -f "$FROM/.claude.json" ]; then
-  tgt="$TO/.claude.json"
+# Merge FROM's MCP server definitions (global + per-project) into TO's .claude.json.
+sync_mcp() {  # $1 = from dir, $2 = to dir
+  local from="$1" to="$2" tgt tmp
+  command -v jq >/dev/null 2>&1 || { warn "jq not found — MCP definitions NOT synced"; return 1; }
+  [ -f "$from/.claude.json" ] || return 0
+  tgt="$to/.claude.json"
   [ -f "$tgt" ] || printf '{}\n' > "$tgt"
   tmp="$(mktemp)"
-  if jq --slurpfile src "$FROM/.claude.json" '
+  if jq --slurpfile src "$from/.claude.json" '
         .mcpServers = ((.mcpServers // {}) * ($src[0].mcpServers // {})) |
         .projects = (reduce (($src[0].projects // {}) | to_entries[]
                              | select(.value.mcpServers != null and (.value.mcpServers | length > 0))) as $e
@@ -45,16 +56,42 @@ if command -v jq >/dev/null 2>&1 && [ -f "$FROM/.claude.json" ]; then
              | .mcpServers = ((.mcpServers // {}) * $e.value.mcpServers))))
       ' "$tgt" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
     mv "$tmp" "$tgt"
-    note "MCP server definitions synced (global + per-project)"
-  else
-    rm -f "$tmp"; warn "could not merge .claude.json mcpServers (invalid JSON?) — skipped"
+    return 0
   fi
-else
-  [ -f "$FROM/.claude.json" ] && warn "jq not found — MCP definitions NOT synced"
+  rm -f "$tmp"; warn "could not merge .claude.json mcpServers (invalid JSON?) — skipped"
+  return 1
+}
+
+# --- hook mode: push this dir's MCP defs to its pool siblings ----------------
+if [ "${1:-}" = "--push-mcp" ]; then
+  cat > /dev/null 2>&1 || true   # drain hook stdin
+  from="${CLAUDE_CONFIG_DIR:-}"
+  [ -n "$from" ] && [ -d "$from" ] || exit 0
+  pool=""
+  for pf in "$POOLS_DIR"/*.pool; do
+    [ -f "$pf" ] || continue
+    grep -qxF "$from" "$pf" 2>/dev/null && { pool="$pf"; break; }
+  done
+  [ -n "$pool" ] || exit 0
+  while IFS= read -r member; do
+    case "$member" in ''|\#*) continue ;; esac
+    [ "$member" = "$from" ] && continue
+    [ -d "$member" ] || continue
+    sync_mcp "$from" "$member" >/dev/null 2>&1 || true
+  done < "$pool"
+  exit 0
 fi
 
-# --- 2. Plugins --------------------------------------------------------------
-if [ -d "$FROM/plugins" ]; then
+# --- full sync mode ----------------------------------------------------------
+FROM="${1:-}"; TO="${2:-}"
+[ -d "$FROM" ] && [ -d "$TO" ] || { warn "usage: cc-pool-sync <from-config-dir> <to-config-dir> | --push-mcp"; exit 2; }
+[ "$FROM" = "$TO" ] && exit 0
+
+# 1. MCP server definitions
+sync_mcp "$FROM" "$TO" && note "MCP server definitions synced (global + per-project)"
+
+# 2. Plugins (skip entirely when shared via symlink — already the same dir)
+if [ -d "$FROM/plugins" ] && [ ! -L "$TO/plugins" ]; then
   mkdir -p "$TO/plugins/marketplaces"
   for f in installed_plugins.json known_marketplaces.json; do
     [ -f "$FROM/plugins/$f" ] || continue
@@ -77,9 +114,10 @@ if [ -d "$FROM/plugins" ]; then
   note "plugins synced (installed list + marketplaces)"
 fi
 
-# --- 3. skills / agents / commands -------------------------------------------
+# 3. skills / agents / commands (skip symlinked = shared dirs)
 for d in skills agents commands; do
   [ -d "$FROM/$d" ] || continue
+  [ -L "$TO/$d" ] && continue
   mkdir -p "$TO/$d"
   synced=0
   for entry in "$FROM/$d"/*; do

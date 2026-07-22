@@ -295,6 +295,95 @@ restore_projects() {  # $1 = primary config dir, $2 = client: give history back 
   fi
 }
 
+# Tooling dirs shared across the pool the same way projects/ is: a skill,
+# plugin, or agent added mid-session on ANY member is instantly visible to
+# every other member — no sync needed. (MCP definitions can't join this:
+# they live inside each member's .claude.json next to account state, so
+# they're synced instead — see wire_sync_hook and cc-pool-sync.)
+TOOLING_DIRS="skills plugins agents commands"
+
+share_tooling() {  # $1 = config dir, $2 = client: symlink tooling dirs into the pool
+  local dir="$1" client="$2" d shared entry name tmp
+  for d in $TOOLING_DIRS; do
+    shared="$POOLS_DIR/${client}-${d}"
+    if [ -L "$dir/$d" ]; then
+      ok "$d already shared for ${dir##*/}"
+      continue
+    fi
+    mkdir -p "$shared"
+    if [ -d "$dir/$d" ]; then
+      # Merge existing content in (never delete pool content). Same-named
+      # JSON files are jq-merged (member wins — freshest data); other
+      # same-named entries keep the pool's copy (assumed duplicate).
+      for entry in "$dir/$d"/* "$dir/$d"/.[!.]* "$dir/$d"/..?*; do
+        [ -e "$entry" ] || continue
+        name="$(basename "$entry")"
+        if [ ! -e "$shared/$name" ]; then
+          mv "$entry" "$shared/$name"
+        else
+          case "$name" in
+            *.json)
+              if [ -f "$entry" ] && command -v jq >/dev/null 2>&1; then
+                tmp="$(mktemp)"
+                if jq -s '.[0] * .[1]' "$shared/$name" "$entry" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+                  mv "$tmp" "$shared/$name"
+                else rm -f "$tmp"; fi
+              fi
+              rm -rf "$entry" ;;
+            *) rm -rf "$entry" ;;
+          esac
+        fi
+      done
+      if ! rmdir "$dir/$d" 2>/dev/null; then
+        warn "${dir##*/}/$d could not be emptied — left unshared"
+        continue
+      fi
+      add "Merged ${dir##*/}/$d into the shared pool $d"
+    fi
+    ln -s "$shared" "$dir/$d"
+    add "Linked ${dir##*/}/$d → shared pool $d"
+  done
+}
+
+restore_tooling() {  # $1 = primary config dir, $2 = client: give tooling back on disband
+  local dir="$1" client="$2" d shared
+  for d in $TOOLING_DIRS; do
+    shared="$POOLS_DIR/${client}-${d}"
+    [ -L "$dir/$d" ] && rm -f "$dir/$d"
+    if [ -d "$shared" ] && [ ! -e "$dir/$d" ]; then
+      mv "$shared" "$dir/$d"
+      ok "Restored $d to $dir/$d"
+    fi
+  done
+}
+
+wire_sync_hook() {  # $1 = config dir: push MCP defs to pool siblings when a session ends
+  local dir="$1" settings="$1/settings.json" sync_cmd="$SHARED_DIR/cc-pool-sync --push-mcp"
+  if [ -f "$settings" ] && grep -qF "cc-pool-sync" "$settings"; then
+    ok "MCP sync hook already wired in ${dir##*/}/settings.json"
+    return 0
+  fi
+  if [ ! -f "$settings" ]; then
+    mkdir -p "$dir"
+    printf '{\n  "hooks": { "SessionEnd": [ { "hooks": [ { "type": "command", "command": "%s" } ] } ] }\n}\n' "$sync_cmd" > "$settings"
+    add "Created settings.json with MCP sync hook in ${dir##*/}"
+  elif command -v jq >/dev/null 2>&1; then
+    local tmp; tmp="$(mktemp)"
+    if jq --arg cmd "$sync_cmd" '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + [
+          {hooks: [{type: "command", command: $cmd}]}
+        ])' "$settings" > "$tmp" 2>/dev/null; then
+      mv "$tmp" "$settings"
+      add "Added MCP sync hook (SessionEnd) to ${dir##*/}/settings.json"
+    else
+      rm -f "$tmp"
+      err "${dir##*/}/settings.json isn't valid JSON — refusing to edit it."
+    fi
+  else
+    warn "${dir##*/}/settings.json exists and jq isn't installed — wire the SessionEnd hook manually:"
+    info "  \"hooks\": { \"SessionEnd\": [ { \"hooks\": [ { \"type\": \"command\", \"command\": \"$sync_cmd\" } ] } ] }"
+  fi
+}
+
 next_member_name() {  # $1 = client: first free <client>-N (N >= 2)
   local n=2
   while [ -d "$CLIENTS_PARENT/$1-$n" ] || grep -qxF "$CLIENTS_PARENT/$1-$n" "$(pool_file "$1")" 2>/dev/null; do
@@ -459,7 +548,9 @@ cmd_pool_add() {
     ok "Pool exists: $pf"
   fi
   share_projects "$primary_dir" "$client"
+  share_tooling "$primary_dir" "$client"
   wire_hook "$primary_dir"
+  wire_sync_hook "$primary_dir"
 
   # New member: next free <client>-N, bootstrapped like any config dir.
   local member member_dir
@@ -469,11 +560,13 @@ cmd_pool_add() {
   env -u CLAUDE_CONFIG_DIR bash "$setup" --client "$member" --clients-parent "$CLIENTS_PARENT" --shared-dir "$SHARED_DIR"
   printf '%s\n' "$client" > "$member_dir/$POOL_MARKER"
   wire_hook "$member_dir"
+  wire_sync_hook "$member_dir"
   share_projects "$member_dir" "$client"
-  # Tooling parity: the new member inherits the primary's MCP servers, plugins,
-  # and skills, so a rotation onto it doesn't lose tools mid-session.
+  share_tooling "$member_dir" "$client"
+  # MCP parity: the new member inherits the primary's server definitions
+  # (skills/plugins/agents are already shared via the symlinks above).
   if [ -x "$SHARED_DIR/cc-pool-sync" ]; then
-    "$SHARED_DIR/cc-pool-sync" "$primary_dir" "$member_dir" || warn "tooling sync failed — run by hand: $SHARED_DIR/cc-pool-sync $primary_dir $member_dir"
+    "$SHARED_DIR/cc-pool-sync" "$primary_dir" "$member_dir" || warn "MCP sync failed — run by hand: $SHARED_DIR/cc-pool-sync $primary_dir $member_dir"
   fi
   grep -qxF "$member_dir" "$pf" || printf '%s\n' "$member_dir" >> "$pf"
   ok "Added $member to the pool (rotation order = pool file order)"
@@ -570,6 +663,7 @@ cmd_pool_remove() {
       remaining="$(grep -cv '^[[:space:]]*$' "$pf" 2>/dev/null || echo 0)"
       if [ "$remaining" -le 1 ]; then
         restore_projects "$CLIENTS_PARENT/$client" "$client"
+        restore_tooling "$CLIENTS_PARENT/$client" "$client"
         rm -f "$pf"
         ok "Pool disbanded — cc-$client is single-account again"
         info "(the rate-limit hook stays in settings.json; it's inert without cc-rotate)"
@@ -610,11 +704,16 @@ cmd_revert() {
         [ "$d" = "$primary" ] && continue
         if [ "$FORCE" -eq 1 ]; then
           [ -d "$d" ] && { rm -rf "$d"; ok "Removed pool member (${d##*/})"; }
-        elif [ -L "$d/projects" ]; then
-          rm -f "$d/projects"; mkdir -p "$d/projects"
+        else
+          if [ -L "$d/projects" ]; then rm -f "$d/projects"; mkdir -p "$d/projects"; fi
+          local td
+          for td in $TOOLING_DIRS; do
+            [ -L "$d/$td" ] && { rm -f "$d/$td"; mkdir -p "$d/$td"; }
+          done
         fi
       done < "$pf"
       [ -n "$primary" ] && [ -d "$primary" ] && restore_projects "$primary" "$client"
+      [ -n "$primary" ] && [ -d "$primary" ] && restore_tooling "$primary" "$client"
     done
     if [ "$FORCE" -eq 0 ] && [ "$had_pools" -eq 1 ]; then
       warn "Kept pool member dirs (they hold real logins); their shared history went"
