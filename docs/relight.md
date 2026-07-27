@@ -1,0 +1,198 @@
+# Relight: automating MCP + Chrome-extension re-login on account switch
+
+**Status: investigation / design (nothing here is implemented yet).**
+Researched 2026-07-27 against Claude Code v2.1.220, this repo's pool/rotation
+machinery, and the upstream `anthropics/claude-code` issue tracker + changelog.
+
+## Problem
+
+Rotation pools make sessions survive a rate limit — transcripts, skills,
+plugins, agents, commands, and MCP *definitions* all carry across the switch
+(symlinks + `cc-pool-sync`). Two things still die and need manual "relighting"
+on every switch to a member account:
+
+1. **OAuth-backed MCP servers** (Linear, Notion, …) — each member must run
+   `/mcp` → authenticate once per server.
+2. **Claude in Chrome pairing** — the browser extension needs `/chrome`
+   re-pairing, and may refuse to connect at all under the rotated account.
+
+This doc records where that state actually lives, what upstream will and won't
+fix, and the recommended automation design.
+
+## Where the state actually lives
+
+Everything below was verified against the shipped `claude` binary (the file
+layout is not fully documented). Per config dir (`CLAUDE_CONFIG_DIR`):
+
+| State | File | Scope | Carried across rotation today? |
+|---|---|---|---|
+| `claudeAiOauth` (Anthropic login) | `<dir>/.credentials.json` | Anthropic account | No — **by design**, this is the whole point of separate accounts |
+| `mcpOAuth`, `mcpOAuthClientConfig` (third-party MCP tokens: accessToken, refreshToken, clientId, clientSecret, expiresAt, scope per server) | **same** `.credentials.json` | third-party service | **No — the gap** |
+| `trustedDeviceToken` (Remote Control bridge) | same `.credentials.json` | Anthropic account | No (one-time re-enroll per member, then persists in that dir) |
+| MCP server *definitions* | `<dir>/.claude.json` `.mcpServers` | neither | Yes (`cc-pool-sync`) |
+| `chromeExtension.pairedDeviceId` / `.pairedDeviceName`, `cachedChromeExtensionInstalled` | `<dir>/.claude.json` | local device pairing — **no secrets** | **No — the other gap** |
+| `mcp-needs-auth-cache.json`, `mcp-discovery-cache/` | `<dir>/` | third-party | No (harmless, but stale "needs auth" nags) |
+| Native-messaging host manifest, `/tmp/claude-mcp-browser-bridge-$USER` socket | outside any config dir | machine/user | Yes (implicitly shared already) |
+
+Key facts that shape the design:
+
+- **MCP OAuth tokens sit in the *same* `.credentials.json` as the Anthropic
+  login**, as sibling top-level keys. On macOS the whole store is one Keychain
+  item (`Claude Code-credentials`, suffixed `-<sha256(configDir)[:8]>` for
+  non-default dirs). Linux/Windows: plain file, mode 0600.
+- **MCP OAuth grants are independent of the Anthropic account.** They are
+  grants from Linear/Notion/etc. to *this human*; switching the active
+  Anthropic account does not invalidate them. They're merely stranded in the
+  other config dir. Copying them between members leaks no Anthropic
+  credential and touches no Anthropic token — it is not the ToS ban vector
+  (which is proxying/extracting *Anthropic* OAuth).
+- **`CLAUDE_SECURESTORAGE_CONFIG_DIR`** (undocumented, first-class in the
+  binary) points the credential store at a different directory than
+  `CLAUDE_CONFIG_DIR`. It moves the *whole* store — `claudeAiOauth` included —
+  so it cannot unify pools (members must keep distinct Anthropic logins), but
+  see "single-login variant" below.
+- **Chrome pairing is per config dir but secret-free** (`pairedDeviceId` is a
+  local device identifier). However, since v2.1.208/2.1.216 upstream
+  *enforces* that the CLI's Anthropic account matches the claude.ai account
+  the Chrome profile is logged into, and the extension has **no account
+  selector** (feature request dup-closed as #69208).
+
+## What upstream will and won't fix (build-vs-wait)
+
+Shipped and usable now:
+
+- `claude mcp login <server>` / `logout` (v2.1.186+) — scriptable per-dir MCP
+  auth from the shell, `--no-browser` paste-the-URL flow for headless.
+- `--callback-port` — pins the OAuth callback port. Without it the credential
+  key embeds a random ephemeral port, which is why parallel instances re-auth
+  (#43000, closed not-planned; the flag is the sanctioned mitigation).
+- `headersHelper` + `${ENV}` expansion in `.mcp.json` (v2.1.195+) — servers
+  that accept static tokens can skip OAuth entirely via a shared script.
+- Auto refresh on 401/reconnect (v2.1.206/2.1.208).
+
+Requested but going nowhere (don't wait):
+
+- Multi-account login/switching (`gh auth switch`-style): ~a dozen issues,
+  all dup-closed or stale — canonical open one is
+  [#30031](https://github.com/anthropics/claude-code/issues/30031); `/login`
+  in-place switching closed not-planned
+  ([#23906](https://github.com/anthropics/claude-code/issues/23906)).
+  `CLAUDE_CONFIG_DIR`-per-account (this repo's design) is the converged
+  community pattern; no sign it gets obsoleted.
+- MCP token export/import or cross-dir sharing: no issue, no primitive. The
+  on-disk format is fully reverse-engineered in
+  [#43000](https://github.com/anthropics/claude-code/issues/43000) /
+  [#59460](https://github.com/anthropics/claude-code/issues/59460) (open:
+  every re-auth re-runs Dynamic Client Registration, orphaning the previous
+  refresh token — the area churns, so copied tokens are valid but fragile).
+- Chrome extension account selector decoupled from browser login:
+  dup-closed ([#69208](https://github.com/anthropics/claude-code/issues/69208)).
+  Upstream direction is the opposite — enforce account match.
+
+**Verdict: build locally.**
+
+## Recommended design
+
+### Phase 1 — MCP OAuth relight (high value, low risk)
+
+Extend `cc-pool-sync` with a credential-key cherry-pick, alongside the
+existing `.claude.json` merge:
+
+1. `sync_mcp_oauth <from> <to>`: with `jq`, copy **only** the `mcpOAuth` and
+   `mcpOAuthClientConfig` top-level keys from `<from>/.credentials.json` into
+   `<to>/.credentials.json`, per-server, **freshest-wins by `expiresAt`**.
+   Never read or write `claudeAiOauth`, `trustedDeviceToken`, `designOauth`,
+   `organizationUuid`, `enterpriseGateway`, `pluginSecrets`. Create the target
+   file `{}` if absent; `chmod 600` before writing content; write via temp
+   file + `mv` in the same directory.
+2. Run it in all three existing sync moments: `--pool-add` provisioning, each
+   `cc-rotate` iteration (`LAST_DIR` → next dir), and the `SessionEnd`
+   `--push-mcp` hook (so a token refreshed mid-session propagates before the
+   next launch — this defuses the "snapshots go stale in hours" rotation
+   problem, since refresh tokens rotate on use).
+3. Delete `<to>/mcp-needs-auth-cache.json` after a successful copy so the
+   startup "servers need auth" notice doesn't lie.
+4. Fallback when `jq` is missing or on macOS-keychain dirs: print the exact
+   `claude mcp login <server>` commands per member instead (see Phase 1b).
+   Keychain support (`security find/add-generic-password` against the
+   suffixed service name) is possible but deferred — file format inside the
+   keychain item is the same JSON blob.
+
+Why copy rather than symlink one shared `.credentials.json`: the file also
+holds `claudeAiOauth`, and pool members are *different* Anthropic accounts.
+A shared store would collapse the isolation that makes rotation work.
+
+Known fragility (accepted): upstream DCR churn (#59460) means a manual
+`/mcp` re-auth on one member mints a fresh OAuth client and can orphan the
+copied refresh tokens on siblings — the next SessionEnd push re-heals them.
+
+### Phase 1b — first-provision auth, and OAuth-free servers
+
+- `claude-session --pool-add` and `--login` should finish by offering
+  scripted auth for any still-unauthenticated OAuth server:
+  `CLAUDE_CONFIG_DIR=<member> claude mcp login <server>` (add
+  `--callback-port <fixed>` to the server definition so credential keys stay
+  stable across instances). With Phase 1 in place this is needed **once, on
+  the primary only** — the copy fans it out.
+- Document the zero-relight option for servers that accept static tokens
+  (GitHub PAT, Sentry, internal servers): define them with
+  `headers.Authorization = "Bearer ${VAR}"` or a `headersHelper` script that
+  reads a token from `~/.claude-shared/` — one token, all members, no OAuth
+  at all.
+
+### Phase 2 — Chrome extension
+
+Two distinct sub-problems:
+
+1. **Pairing state** (`chromeExtension.*`, `cachedChromeExtensionInstalled`
+   in `.claude.json`): add these keys to `cc-pool-sync`'s `.claude.json`
+   merge (additive, source wins). Secret-free, and removes the `/chrome`
+   re-pair dance where accounts permit connection.
+2. **Account match** (the hard wall): the extension authenticates as the
+   claude.ai account of the *Chrome profile*, and since v2.1.208/2.1.216 the
+   CLI refuses/flags a mismatch. There is no unify-to-one-login here and no
+   scripting surface. The only working pattern for cross-account rotation is
+   **one Chrome profile per pool member**, each logged into the matching
+   claude.ai account. Optional launcher sugar: `cc-rotate` can, on switch,
+   print (or with an opt-in flag, launch) the matching profile —
+   `google-chrome --profile-directory=<mapped>` — mapping stored next to the
+   pool file (e.g. `pools/<client>.chrome-profiles`). Recommend print-only by
+   default.
+3. **Remote Control** already re-arms via `--remote-control` re-add in
+   `cc-rotate`; `trustedDeviceToken` is Anthropic-account-scoped so each
+   member enrolls once and then keeps it in its own dir. No action; document.
+
+### Rejected: unify to a single login
+
+- `CLAUDE_SECURESTORAGE_CONFIG_DIR` pointed at a shared dir gives all config
+  dirs one credential store — one login, one set of MCP grants. That is the
+  right tool for the *single-account, many-client-dirs* user (worth a README
+  note), but for rotation pools it would make every member the same Anthropic
+  account, which defeats rate-limit rotation entirely.
+- Anything that proxies or extracts the Anthropic OAuth token to fake a
+  unified login stays out of scope permanently (ToS ban vector — repo
+  invariant).
+
+## Upstream asks worth filing / upvoting
+
+- [#30031](https://github.com/anthropics/claude-code/issues/30031) — native
+  multi-account switching (upvote).
+- [#69208](https://github.com/anthropics/claude-code/issues/69208) /
+  successor — Chrome extension account selector (upvote/refile).
+- [#59460](https://github.com/anthropics/claude-code/issues/59460) — DCR
+  client reuse (upvote; it's what makes token copies fragile).
+- [#20215](https://github.com/anthropics/claude-code/issues/20215) — device
+  authorization grant for headless MCP auth.
+- New: `claude mcp login --if-needed` (exit 0 silently when a valid token
+  exists) so a `SessionStart` hook can relight non-interactively; and
+  documented export/import of `mcpOAuth` entries.
+
+## Invariants for the implementation
+
+- Never copy, share, proxy, or log `claudeAiOauth`, `trustedDeviceToken`,
+  `designOauth`, `organizationUuid`, `enterpriseGateway`, `pluginSecrets`.
+- `.credentials.json` writes: 0600 before content, temp-file + same-dir `mv`,
+  target's non-MCP keys preserved verbatim, additive per-server merge.
+- `jq` remains optional: without it, fall back to printing the
+  `claude mcp login` commands — never risk corrupting the credential file.
+- Idempotent: a re-run with identical stores changes nothing.
