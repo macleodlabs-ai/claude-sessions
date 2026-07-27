@@ -212,7 +212,7 @@ cleanly if a Claude Code update changes the credential layout:
 - **`v1.0.0`** = commit `b39d5cc` — last state *before* any
   credential/pairing sync existed (`cc-pool-sync` touched only MCP
   definitions, plugins, skills).
-- **`v1.1.0`** = commit `15112e2` — this implementation (credential relogin
+- **`v1.1.0`** = commit `82a0b9d` — this implementation (credential relogin
   + Chrome pairing sync + plugin/skill push in the SessionEnd hook;
   `claude-session --version` reports the matching `CCB_VERSION`).
 
@@ -222,7 +222,7 @@ clone:
 
 ```bash
 git tag -a v1.0.0 b39d5cc -m "Pre-relogin baseline"
-git tag -a v1.1.0 15112e2 -m "Third-party auth relogin"
+git tag -a v1.1.0 82a0b9d -m "Third-party auth relogin"
 git push origin v1.0.0 v1.1.0
 ```
 
