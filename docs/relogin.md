@@ -1,9 +1,15 @@
 # Relogin: automating MCP + Chrome-extension re-login on account switch
 
 **Status: Phase 1 (MCP OAuth + plugin-secret relogin) and the Phase 2 Chrome
-pairing sync are IMPLEMENTED in `cc-pool-sync` (v1.1.0).** Still open:
-scripted `claude mcp login` during provisioning, per-account Chrome profile
-mapping, macOS keychain support. Rollback: see "Versioning" at the end.
+pairing sync are IMPLEMENTED in `cc-pool-sync` (v1.1.0). v1.2.0 adds the
+Phase 1b provisioning hints (`--pool-list`/`--pool-add` name each MCP server
+still awaiting its one-time `claude mcp login`) and the Phase 2 Chrome
+profile map (`pools/<client>.chrome-profiles`, printed by `cc-rotate` on
+switch).** Still open: macOS keychain support — deliberately unimplemented,
+because on macOS the third-party keys live inside the same keychain item as
+the Anthropic login, and rewriting that item from a script risks corrupting
+the login store (the exact failure mode this design forbids); authenticate
+once per member there. Rollback: see "Versioning" at the end.
 Researched 2026-07-27 against Claude Code v2.1.220, this repo's pool/rotation
 machinery, and the upstream `anthropics/claude-code` issue tracker + changelog.
 
@@ -134,12 +140,12 @@ copied refresh tokens on siblings — the next SessionEnd push re-heals them.
 
 ### Phase 1b — first-provision auth, and OAuth-free servers
 
-- `claude-session --pool-add` and `--login` should finish by offering
-  scripted auth for any still-unauthenticated OAuth server:
-  `CLAUDE_CONFIG_DIR=<member> claude mcp login <server>` (add
-  `--callback-port <fixed>` to the server definition so credential keys stay
-  stable across instances). With Phase 1 in place this is needed **once, on
-  the primary only** — the copy fans it out.
+- Implemented (v1.2.0): `--pool-list` (and therefore the pool status printed
+  at the end of `--pool-add`) names every remote MCP server that still lacks
+  an OAuth grant in each member dir, with the `claude mcp login <server>`
+  command to run. With Phase 1 in place that auth is needed **once, on any
+  member** — the sync fans it out. (Consider `--callback-port <fixed>` in
+  server definitions so credential keys stay stable across instances.)
 - Document the zero-relogin option for servers that accept static tokens
   (GitHub PAT, Sentry, internal servers): define them with
   `headers.Authorization = "Bearer ${VAR}"` or a `headersHelper` script that
@@ -159,11 +165,11 @@ Two distinct sub-problems:
    CLI refuses/flags a mismatch. There is no unify-to-one-login here and no
    scripting surface. The only working pattern for cross-account rotation is
    **one Chrome profile per pool member**, each logged into the matching
-   claude.ai account. Optional launcher sugar: `cc-rotate` can, on switch,
-   print (or with an opt-in flag, launch) the matching profile —
-   `google-chrome --profile-directory=<mapped>` — mapping stored next to the
-   pool file (e.g. `pools/<client>.chrome-profiles`). Recommend print-only by
-   default.
+   claude.ai account. Implemented (v1.2.0, print-only): create
+   `~/.claude-shared/pools/<client>.chrome-profiles` with one
+   `<member-name>=<profile name>` line per member (blank lines and
+   `#`-comments allowed), and `cc-rotate` names the matching profile on each
+   switch — it never launches or kills the browser.
 3. **Remote Control** already re-arms via `--remote-control` re-add in
    `cc-rotate`; `trustedDeviceToken` is Anthropic-account-scoped so each
    member enrolls once and then keeps it in its own dir. No action; document.
@@ -215,6 +221,8 @@ cleanly if a Claude Code update changes the credential layout:
 - **`v1.1.0`** = commit `82a0b9d` — this implementation (credential relogin
   + Chrome pairing sync + plugin/skill push in the SessionEnd hook;
   `claude-session --version` reports the matching `CCB_VERSION`).
+- **`v1.2.0`** — Phase 1b/2 follow-up: MCP-login hints in the pool status
+  and the `pools/<client>.chrome-profiles` map printed by `cc-rotate`.
 
 The remote this was developed through only accepts branch pushes, so the
 tags exist locally on the dev container; recreate/push them from any normal

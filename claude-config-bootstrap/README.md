@@ -200,6 +200,7 @@ walkthrough is in the repo README; this section is the reference.
 | Hook helper | `~/.claude-shared/cc-rotate-kill` | `StopFailure` hook target; signals the supervisor and TERMs claude |
 | Pool file | `~/.claude-shared/pools/<client>.pool` | Ordered list of config-dir paths — rotation order, primary first |
 | Sync helper | `~/.claude-shared/cc-pool-sync` | Tooling + third-party-auth parity: full sync at `--pool-add` and each rotation, `--push-mcp` hook mode at `SessionEnd` |
+| Chrome map (optional) | `~/.claude-shared/pools/<client>.chrome-profiles` | `<member-name>=<profile>` lines; on a switch `cc-rotate` names the Chrome profile whose claude.ai login matches the new account (print-only) |
 | Shared history | `~/.claude-shared/pools/<client>-projects/` | The pool's one real `projects/` dir; every member's `projects` is a symlink to it |
 | Member marker | `<member-dir>/.ccb-pool-member` | Contains the primary's name; tells the CLI this dir is a pool member, not a standalone client (no `cc-` launcher is generated for it) |
 

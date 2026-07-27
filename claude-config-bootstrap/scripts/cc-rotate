@@ -37,6 +37,12 @@ shift
 
 POOL_FILE="${POOLS_DIR}/${CLIENT}.pool"
 PROJECTS="${POOLS_DIR}/${CLIENT}-projects"
+# Optional Chrome-profile map: the extension only connects when the browser
+# profile's claude.ai login matches the active account, so cross-account
+# rotation needs one Chrome profile per member. Lines: <member-name>=<profile>
+# (e.g. "macleod-2=Profile 2"); blank lines and #-comments allowed. We only
+# print guidance — never launch or kill the user's browser.
+CHROME_MAP="${POOLS_DIR}/${CLIENT}.chrome-profiles"
 [ -f "$POOL_FILE" ] || { fail "no pool file at $POOL_FILE — create one with: claude-session --pool-add $CLIENT"; exit 2; }
 
 # Read the pool (skip blanks/comments, warn on missing dirs).
@@ -72,6 +78,12 @@ for dir in "${DIRS[@]}"; do
     "${SHARED_DIR}/cc-pool-sync" "$LAST_DIR" "$dir" || warn "tooling sync failed — continuing anyway"
   fi
   export CLAUDE_CONFIG_DIR="$dir"
+  if [ -f "$CHROME_MAP" ]; then
+    prof="$(grep -m1 "^${label}=" "$CHROME_MAP" 2>/dev/null | cut -d= -f2-)"
+    if [ -n "${prof:-}" ]; then
+      [ -n "$LAST_DIR" ] && note "Chrome: ${label} pairs with browser profile '${prof}' — switch to it and run /chrome to reconnect"
+    fi
+  fi
   LAST_DIR="$dir"
 
   args=()

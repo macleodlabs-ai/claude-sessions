@@ -46,7 +46,7 @@ set -euo pipefail
 
 # Bumped with the repo's release tags (v<CCB_VERSION>) so an installed copy in
 # ~/.claude-shared can be matched to a tag for a safe rollback.
-CCB_VERSION="1.1.0"
+CCB_VERSION="1.2.0"
 
 # --- styling ---------------------------------------------------------------
 if [ -t 1 ]; then
@@ -404,6 +404,29 @@ logged_in() {  # $1 = config dir: 0 if this dir holds a completed login
   return 1
 }
 
+mcp_login_hints() {  # $1 = config dir: list OAuth-backed MCP servers with no token yet
+  local dir="$1" servers missing="" s
+  command -v jq >/dev/null 2>&1 || return 0
+  [ -f "$dir/.claude.json" ] || return 0
+  # macOS keeps tokens in the keychain, not .credentials.json — can't tell, stay quiet.
+  [ "$(uname -s)" = "Darwin" ] && [ ! -f "$dir/.credentials.json" ] && return 0
+  # Remote servers without a static Authorization header need an OAuth grant.
+  servers="$(jq -r '(.mcpServers // {}) | to_entries[]
+        | select(.value.type == "http" or .value.type == "sse")
+        | select((.value.headers // {}) | has("Authorization") | not)
+        | .key' "$dir/.claude.json" 2>/dev/null)" || return 0
+  [ -n "$servers" ] || return 0
+  for s in $servers; do
+    [ -f "$dir/.credentials.json" ] && jq -e --arg s "$s" \
+        '(.mcpOAuth // {}) | keys[] | select(startswith($s + "|"))' \
+        "$dir/.credentials.json" >/dev/null 2>&1 && continue
+    missing="$missing $s"
+  done
+  [ -n "$missing" ] || return 0
+  warn "MCP servers not yet authenticated in ${dir##*/}:${missing}"
+  info "    once, on any pool member:  claude mcp login <server>  (the relogin sync fans it out)"
+}
+
 can_login_here() {  # interactive login possible? (claude on PATH + a real tty)
   command -v claude >/dev/null 2>&1 || return 1
   { : </dev/tty; } 2>/dev/null || return 1
@@ -445,6 +468,7 @@ print_pool() {  # $1 = client: list members, order, login state
     if ! logged_in "$dir"; then
       info "    log in with: claude-session --login $(basename "$dir")"
     fi
+    mcp_login_hints "$dir"
   done < "$pf"
 }
 
