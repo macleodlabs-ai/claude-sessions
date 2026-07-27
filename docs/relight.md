@@ -209,11 +209,22 @@ Two distinct sub-problems:
 The repo carries release tags so the relight machinery can be regressed
 cleanly if a Claude Code update changes the credential layout:
 
-- **`v1.0.0`** — last state *before* any credential/pairing sync existed
-  (`cc-pool-sync` touched only MCP definitions, plugins, skills).
-- **`v1.1.0`** — this implementation (credential relight + Chrome pairing
-  sync + plugin/skill push in the SessionEnd hook; `claude-session --version`
-  reports the matching `CCB_VERSION`).
+- **`v1.0.0`** = commit `b39d5cc` — last state *before* any
+  credential/pairing sync existed (`cc-pool-sync` touched only MCP
+  definitions, plugins, skills).
+- **`v1.1.0`** = commit `15112e2` — this implementation (credential relight
+  + Chrome pairing sync + plugin/skill push in the SessionEnd hook;
+  `claude-session --version` reports the matching `CCB_VERSION`).
+
+The remote this was developed through only accepts branch pushes, so the
+tags exist locally on the dev container; recreate/push them from any normal
+clone:
+
+```bash
+git tag -a v1.0.0 b39d5cc -m "Pre-relight baseline"
+git tag -a v1.1.0 15112e2 -m "Third-party auth relight"
+git push origin v1.0.0 v1.1.0
+```
 
 To roll back: `git checkout v1.0.0 -- claude-session claude-config-bootstrap`
 then re-run `claude-session --create <any-client>` (or `--pool-add`), which
