@@ -41,7 +41,7 @@
 # Anthropic account is active) are synced.
 #
 # macOS caveat: there the whole credential store lives in the system
-# keychain, not .credentials.json, so credential relight is skipped —
+# keychain, not .credentials.json, so credential relogin is skipped —
 # authenticate once per member (`claude mcp login <server>`).
 
 set -uo pipefail
@@ -79,7 +79,7 @@ sync_mcp() {  # $1 = from dir, $2 = to dir
   return 1
 }
 
-# Relight third-party auth: cherry-pick mcpOAuth (freshest expiresAt wins),
+# Relogin third-party auth: cherry-pick mcpOAuth (freshest expiresAt wins),
 # mcpOAuthClientConfig, and pluginSecrets from FROM's .credentials.json into
 # TO's. Every other key in the target — the Anthropic login included — is
 # preserved verbatim, and the write is temp-file + same-dir mv at mode 0600.
@@ -87,12 +87,12 @@ sync_credentials() {  # $1 = from dir, $2 = to dir
   local from="$1" to="$2" src tgt tmp n
   src="$from/.credentials.json"; tgt="$to/.credentials.json"
   command -v jq >/dev/null 2>&1 || {
-    warn "jq not found — third-party credentials NOT relit; run 'claude mcp login <server>' under the target account"
+    warn "jq not found — third-party credentials NOT relogged-in; run 'claude mcp login <server>' under the target account"
     return 1
   }
   if [ ! -f "$src" ]; then
     [ "$(uname -s)" = "Darwin" ] && \
-      warn "no $src (macOS keychain store) — credential relight unsupported; run 'claude mcp login <server>' per member"
+      warn "no $src (macOS keychain store) — credential relogin unsupported; run 'claude mcp login <server>' per member"
     return 0
   fi
   n="$(jq -r '((.mcpOAuth // {}) | length)
@@ -120,8 +120,8 @@ sync_credentials() {  # $1 = from dir, $2 = to dir
     else
       mv "$tmp" "$tgt"
       chmod 600 "$tgt" 2>/dev/null || true
-      rm -f "$to/mcp-needs-auth-cache.json"   # freshly-relit servers shouldn't nag for auth
-      note "third-party credentials relit → ${to##*/} (MCP OAuth / plugin secrets; Anthropic login untouched)"
+      rm -f "$to/mcp-needs-auth-cache.json"   # freshly-relogged-in servers shouldn't nag for auth
+      note "third-party credentials relogged-in → ${to##*/} (MCP OAuth / plugin secrets; Anthropic login untouched)"
     fi
     return 0
   fi
@@ -133,7 +133,7 @@ sync_credentials() {  # $1 = from dir, $2 = to dir
 # These keys hold a local device-pairing id and installed flags — no secrets.
 # The extension still only connects when the Chrome profile's claude.ai login
 # matches the active account (upstream enforces the match), so cross-account
-# pools additionally need one Chrome profile per member; see docs/relight.md.
+# pools additionally need one Chrome profile per member; see docs/relogin.md.
 sync_chrome() {  # $1 = from dir, $2 = to dir
   local from="$1" to="$2" tgt tmp
   command -v jq >/dev/null 2>&1 || return 1
@@ -232,7 +232,7 @@ FROM="${1:-}"; TO="${2:-}"
 # 1. MCP server definitions
 sync_mcp "$FROM" "$TO" && note "MCP server definitions synced (global + per-project)"
 
-# 2. Third-party auth relight (MCP OAuth tokens, plugin secrets) + Chrome pairing
+# 2. Third-party auth relogin (MCP OAuth tokens, plugin secrets) + Chrome pairing
 sync_credentials "$FROM" "$TO" || true
 sync_chrome "$FROM" "$TO" || true
 

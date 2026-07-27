@@ -166,15 +166,15 @@ The switch is seamless by design:
   next to its login state, so they're synced instead of shared: on every
   rotation, at `--pool-add`, and via a `SessionEnd` hook whenever any session
   closes.
-- **Third-party logins survive** — the same three sync moments also relight
-  auth: OAuth tokens for MCP servers (e.g. Linear), plugin secrets, and the
+- **Third-party logins survive** — the same three sync moments also handle relogin:
+  OAuth tokens for MCP servers (e.g. Linear), plugin secrets, and the
   Chrome-extension pairing are cherry-picked across the pool (freshest token
   wins), so authenticating a server once on *any* member covers all of them.
   Each account's own **Anthropic login is never copied** — that isolation is
   the point of the pool. Exceptions: macOS keeps credentials in the keychain,
   out of the sync's reach (authenticate once per member there), and the
   Chrome extension additionally requires the browser profile's claude.ai
-  login to match the active account — see `docs/relight.md`.
+  login to match the active account — see `docs/relogin.md`.
 
 ```bash
 claude-session --pool-add macleod      # add another account (macleod-3, ...)

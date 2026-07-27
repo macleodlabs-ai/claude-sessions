@@ -1,6 +1,6 @@
-# Relight: automating MCP + Chrome-extension re-login on account switch
+# Relogin: automating MCP + Chrome-extension re-login on account switch
 
-**Status: Phase 1 (MCP OAuth + plugin-secret relight) and the Phase 2 Chrome
+**Status: Phase 1 (MCP OAuth + plugin-secret relogin) and the Phase 2 Chrome
 pairing sync are IMPLEMENTED in `cc-pool-sync` (v1.1.0).** Still open:
 scripted `claude mcp login` during provisioning, per-account Chrome profile
 mapping, macOS keychain support. Rollback: see "Versioning" at the end.
@@ -11,7 +11,7 @@ machinery, and the upstream `anthropics/claude-code` issue tracker + changelog.
 
 Rotation pools make sessions survive a rate limit — transcripts, skills,
 plugins, agents, commands, and MCP *definitions* all carry across the switch
-(symlinks + `cc-pool-sync`). Two things still die and need manual "relighting"
+(symlinks + `cc-pool-sync`). Two things still die and need a manual relogin
 on every switch to a member account:
 
 1. **OAuth-backed MCP servers** (Linear, Notion, …) — each member must run
@@ -96,7 +96,7 @@ Requested but going nowhere (don't wait):
 
 ## Recommended design
 
-### Phase 1 — MCP OAuth relight (high value, low risk)
+### Phase 1 — MCP OAuth relogin (high value, low risk)
 
 Extend `cc-pool-sync` with a credential-key cherry-pick, alongside the
 existing `.claude.json` merge:
@@ -140,7 +140,7 @@ copied refresh tokens on siblings — the next SessionEnd push re-heals them.
   `--callback-port <fixed>` to the server definition so credential keys stay
   stable across instances). With Phase 1 in place this is needed **once, on
   the primary only** — the copy fans it out.
-- Document the zero-relight option for servers that accept static tokens
+- Document the zero-relogin option for servers that accept static tokens
   (GitHub PAT, Sentry, internal servers): define them with
   `headers.Authorization = "Bearer ${VAR}"` or a `headersHelper` script that
   reads a token from `~/.claude-shared/` — one token, all members, no OAuth
@@ -190,7 +190,7 @@ Two distinct sub-problems:
 - [#20215](https://github.com/anthropics/claude-code/issues/20215) — device
   authorization grant for headless MCP auth.
 - New: `claude mcp login --if-needed` (exit 0 silently when a valid token
-  exists) so a `SessionStart` hook can relight non-interactively; and
+  exists) so a `SessionStart` hook can relogin non-interactively; and
   documented export/import of `mcpOAuth` entries.
 
 ## Invariants for the implementation
@@ -206,13 +206,13 @@ Two distinct sub-problems:
 
 ## Versioning and safe rollback
 
-The repo carries release tags so the relight machinery can be regressed
+The repo carries release tags so the relogin machinery can be regressed
 cleanly if a Claude Code update changes the credential layout:
 
 - **`v1.0.0`** = commit `b39d5cc` — last state *before* any
   credential/pairing sync existed (`cc-pool-sync` touched only MCP
   definitions, plugins, skills).
-- **`v1.1.0`** = commit `15112e2` — this implementation (credential relight
+- **`v1.1.0`** = commit `15112e2` — this implementation (credential relogin
   + Chrome pairing sync + plugin/skill push in the SessionEnd hook;
   `claude-session --version` reports the matching `CCB_VERSION`).
 
@@ -221,8 +221,8 @@ tags exist locally on the dev container; recreate/push them from any normal
 clone:
 
 ```bash
-git tag -a v1.0.0 b39d5cc -m "Pre-relight baseline"
-git tag -a v1.1.0 15112e2 -m "Third-party auth relight"
+git tag -a v1.0.0 b39d5cc -m "Pre-relogin baseline"
+git tag -a v1.1.0 15112e2 -m "Third-party auth relogin"
 git push origin v1.0.0 v1.1.0
 ```
 

@@ -225,7 +225,7 @@ to it. Transcripts carry no account binding, so any member can replay them.
 A resume can mint a new session UUID, which is why the supervisor re-reads the
 newest `.jsonl` filename after every rotation rather than trusting the old id.
 
-**Third-party auth parity ("relight").** `cc-pool-sync` runs at `--pool-add`,
+**Third-party auth parity ("relogin").** `cc-pool-sync` runs at `--pool-add`,
 before every rotation, and from a `SessionEnd` hook on each member. Besides
 MCP definitions, plugins, and skills, it cherry-picks the *third-party* keys
 out of `.credentials.json` — `mcpOAuth` (freshest `expiresAt` wins, since
@@ -236,7 +236,7 @@ Anthropic account keys (`claudeAiOauth`, `trustedDeviceToken`, `designOauth`,
 `organizationUuid`, `enterpriseGateway`) are **never read or copied** — each
 member keeps its own login. Needs `jq` (prints what to run by hand without
 it); no-op on macOS, where the credential store is the keychain. Full
-investigation and design rationale: `docs/relight.md` in the repo.
+investigation and design rationale: `docs/relogin.md` in the repo.
 
 **Failure policy.** Pool exhausted → red stderr, non-zero exit, and a manual
 `claude --resume` command you can run by hand later. A non-rate-limit exit
