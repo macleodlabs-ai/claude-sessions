@@ -199,6 +199,8 @@ walkthrough is in the repo README; this section is the reference.
 | Supervisor | `~/.claude-shared/cc-rotate` | Launches `claude` per pool dir; on the rotate signal relaunches the next dir with `--resume <session-id>` |
 | Hook helper | `~/.claude-shared/cc-rotate-kill` | `StopFailure` hook target; signals the supervisor and TERMs claude |
 | Pool file | `~/.claude-shared/pools/<client>.pool` | Ordered list of config-dir paths — rotation order, primary first |
+| Sync helper | `~/.claude-shared/cc-pool-sync` | Tooling + third-party-auth parity: full sync at `--pool-add` and each rotation, `--push-mcp` hook mode at `SessionEnd` |
+| Chrome map (optional) | `~/.claude-shared/pools/<client>.chrome-profiles` | `<member-name>=<profile>` lines; on a switch `cc-rotate` names the Chrome profile whose claude.ai login matches the new account (print-only) |
 | Shared history | `~/.claude-shared/pools/<client>-projects/` | The pool's one real `projects/` dir; every member's `projects` is a symlink to it |
 | Member marker | `<member-dir>/.ccb-pool-member` | Contains the primary's name; tells the CLI this dir is a pool member, not a standalone client (no `cc-` launcher is generated for it) |
 
@@ -223,6 +225,19 @@ location on first `--pool-add` (merge, never delete) and symlinks every member
 to it. Transcripts carry no account binding, so any member can replay them.
 A resume can mint a new session UUID, which is why the supervisor re-reads the
 newest `.jsonl` filename after every rotation rather than trusting the old id.
+
+**Third-party auth parity ("relogin").** `cc-pool-sync` runs at `--pool-add`,
+before every rotation, and from a `SessionEnd` hook on each member. Besides
+MCP definitions, plugins, and skills, it cherry-picks the *third-party* keys
+out of `.credentials.json` — `mcpOAuth` (freshest `expiresAt` wins, since
+refresh tokens rotate on use), `mcpOAuthClientConfig`, `pluginSecrets` — and
+the Chrome-extension pairing keys out of `.claude.json`, so OAuth-backed MCP
+servers and secret-holding plugins stay logged in across a switch. The
+Anthropic account keys (`claudeAiOauth`, `trustedDeviceToken`, `designOauth`,
+`organizationUuid`, `enterpriseGateway`) are **never read or copied** — each
+member keeps its own login. Needs `jq` (prints what to run by hand without
+it); no-op on macOS, where the credential store is the keychain. Full
+investigation and design rationale: `docs/relogin.md` in the repo.
 
 **Failure policy.** Pool exhausted → red stderr, non-zero exit, and a manual
 `claude --resume` command you can run by hand later. A non-rate-limit exit
