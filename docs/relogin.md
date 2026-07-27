@@ -221,7 +221,7 @@ cleanly if a Claude Code update changes the credential layout:
 - **`v1.1.0`** = commit `82a0b9d` — this implementation (credential relogin
   + Chrome pairing sync + plugin/skill push in the SessionEnd hook;
   `claude-session --version` reports the matching `CCB_VERSION`).
-- **`v1.2.0`** — Phase 1b/2 follow-up: MCP-login hints in the pool status
+- **`v1.2.0`** = commit `fbcddf4` — Phase 1b/2 follow-up: MCP-login hints in the pool status
   and the `pools/<client>.chrome-profiles` map printed by `cc-rotate`.
 
 The remote this was developed through only accepts branch pushes, so the
@@ -231,7 +231,8 @@ clone:
 ```bash
 git tag -a v1.0.0 b39d5cc -m "Pre-relogin baseline"
 git tag -a v1.1.0 82a0b9d -m "Third-party auth relogin"
-git push origin v1.0.0 v1.1.0
+git tag -a v1.2.0 fbcddf4 -m "Relogin follow-up: MCP login hints + Chrome profile map"
+git push origin v1.0.0 v1.1.0 v1.2.0
 ```
 
 To roll back: `git checkout v1.0.0 -- claude-session claude-config-bootstrap`
