@@ -39,9 +39,14 @@
 #   --yes, -y            Skip confirmation prompts.
 #   --force              With --revert, also delete every client account dir,
 #                        including pool members (implies --yes).
+#   --version            Print the claude-session version.
 #   -h, --help           Show this help.
 
 set -euo pipefail
+
+# Bumped with the repo's release tags (v<CCB_VERSION>) so an installed copy in
+# ~/.claude-shared can be matched to a tag for a safe rollback.
+CCB_VERSION="1.1.0"
 
 # --- styling ---------------------------------------------------------------
 if [ -t 1 ]; then
@@ -81,7 +86,7 @@ fi
 
 # --- arg parsing -----------------------------------------------------------
 MODE=""; FORCE=0; ASSUME_YES=0; declare -a NAMES=()
-print_help() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; }
+print_help() { sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; }
 sanitize() { printf '%s' "$1" | tr -cd '[:alnum:]_-'; }
 
 while [ $# -gt 0 ]; do
@@ -96,6 +101,7 @@ while [ $# -gt 0 ]; do
     --revert) MODE="revert"; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     --force)  FORCE=1; ASSUME_YES=1; shift ;;
+    --version) printf 'claude-session %s\n' "$CCB_VERSION"; exit 0 ;;
     -h|--help) print_help; exit 0 ;;
     --*) die "Unknown flag: $1 (try --help)" 2 ;;
     *) NAMES+=("$(sanitize "$1")"); shift ;;
@@ -357,7 +363,7 @@ restore_tooling() {  # $1 = primary config dir, $2 = client: give tooling back o
   done
 }
 
-wire_sync_hook() {  # $1 = config dir: push MCP defs to pool siblings when a session ends
+wire_sync_hook() {  # $1 = config dir: push MCP defs + third-party auth to pool siblings when a session ends
   local dir="$1" settings="$1/settings.json" sync_cmd="$SHARED_DIR/cc-pool-sync --push-mcp"
   if [ -f "$settings" ] && grep -qF "cc-pool-sync" "$settings"; then
     ok "MCP sync hook already wired in ${dir##*/}/settings.json"
@@ -563,7 +569,8 @@ cmd_pool_add() {
   wire_sync_hook "$member_dir"
   share_projects "$member_dir" "$client"
   share_tooling "$member_dir" "$client"
-  # MCP parity: the new member inherits the primary's server definitions
+  # MCP parity: the new member inherits the primary's server definitions and
+  # third-party auth — MCP OAuth tokens, plugin secrets, Chrome pairing
   # (skills/plugins/agents are already shared via the symlinks above).
   if [ -x "$SHARED_DIR/cc-pool-sync" ]; then
     "$SHARED_DIR/cc-pool-sync" "$primary_dir" "$member_dir" || warn "MCP sync failed — run by hand: $SHARED_DIR/cc-pool-sync $primary_dir $member_dir"

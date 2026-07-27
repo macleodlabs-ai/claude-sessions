@@ -1,6 +1,9 @@
 # Relight: automating MCP + Chrome-extension re-login on account switch
 
-**Status: investigation / design (nothing here is implemented yet).**
+**Status: Phase 1 (MCP OAuth + plugin-secret relight) and the Phase 2 Chrome
+pairing sync are IMPLEMENTED in `cc-pool-sync` (v1.1.0).** Still open:
+scripted `claude mcp login` during provisioning, per-account Chrome profile
+mapping, macOS keychain support. Rollback: see "Versioning" at the end.
 Researched 2026-07-27 against Claude Code v2.1.220, this repo's pool/rotation
 machinery, and the upstream `anthropics/claude-code` issue tracker + changelog.
 
@@ -98,11 +101,14 @@ Requested but going nowhere (don't wait):
 Extend `cc-pool-sync` with a credential-key cherry-pick, alongside the
 existing `.claude.json` merge:
 
-1. `sync_mcp_oauth <from> <to>`: with `jq`, copy **only** the `mcpOAuth` and
-   `mcpOAuthClientConfig` top-level keys from `<from>/.credentials.json` into
-   `<to>/.credentials.json`, per-server, **freshest-wins by `expiresAt`**.
+1. `sync_credentials <from> <to>`: with `jq`, copy **only** the `mcpOAuth`,
+   `mcpOAuthClientConfig`, and `pluginSecrets` top-level keys from
+   `<from>/.credentials.json` into `<to>/.credentials.json`, per-server,
+   **freshest-wins by `expiresAt`** for tokens. (`pluginSecrets` holds plugin
+   API keys — service-scoped exactly like MCP grants, so it syncs on the same
+   rationale; it was originally on the never-copy list out of caution.)
    Never read or write `claudeAiOauth`, `trustedDeviceToken`, `designOauth`,
-   `organizationUuid`, `enterpriseGateway`, `pluginSecrets`. Create the target
+   `organizationUuid`, `enterpriseGateway`. Create the target
    file `{}` if absent; `chmod 600` before writing content; write via temp
    file + `mv` in the same directory.
 2. Run it in all three existing sync moments: `--pool-add` provisioning, each
@@ -190,9 +196,27 @@ Two distinct sub-problems:
 ## Invariants for the implementation
 
 - Never copy, share, proxy, or log `claudeAiOauth`, `trustedDeviceToken`,
-  `designOauth`, `organizationUuid`, `enterpriseGateway`, `pluginSecrets`.
+  `designOauth`, `organizationUuid`, `enterpriseGateway`. (Third-party
+  `pluginSecrets` IS synced — same service-scoped rationale as `mcpOAuth`.)
 - `.credentials.json` writes: 0600 before content, temp-file + same-dir `mv`,
   target's non-MCP keys preserved verbatim, additive per-server merge.
 - `jq` remains optional: without it, fall back to printing the
   `claude mcp login` commands — never risk corrupting the credential file.
 - Idempotent: a re-run with identical stores changes nothing.
+
+## Versioning and safe rollback
+
+The repo carries release tags so the relight machinery can be regressed
+cleanly if a Claude Code update changes the credential layout:
+
+- **`v1.0.0`** — last state *before* any credential/pairing sync existed
+  (`cc-pool-sync` touched only MCP definitions, plugins, skills).
+- **`v1.1.0`** — this implementation (credential relight + Chrome pairing
+  sync + plugin/skill push in the SessionEnd hook; `claude-session --version`
+  reports the matching `CCB_VERSION`).
+
+To roll back: `git checkout v1.0.0 -- claude-session claude-config-bootstrap`
+then re-run `claude-session --create <any-client>` (or `--pool-add`), which
+reinstalls the older scripts into `~/.claude-shared/` — the installer copies
+on content mismatch, so the downgrade propagates. Already-synced credential
+keys are inert data; nothing needs cleaning up on a rollback.

@@ -109,4 +109,4 @@ Inside any repo for a given client, three layers merge:
 2. **Client-local** — this config dir's `CLAUDE.md` (per billing entity)
 3. **Project-local** — `./CLAUDE.md` at the repo root (per project, loads regardless of config dir)
 
-Credentials and usage windows remain fully isolated per config dir — this skill only shares memory *content* and the statusline *script*, never auth.
+Anthropic credentials and usage windows remain fully isolated per config dir — this skill never copies an Anthropic login. Within a rotation pool, `cc-pool-sync` additionally relights *third-party* auth between members (MCP server OAuth tokens, plugin secrets, and the Chrome-extension pairing) so tools stay logged in across a rate-limit switch; on macOS the credential store is the keychain and each member authenticates its MCP servers once (`claude mcp login <server>`).

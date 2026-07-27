@@ -1,31 +1,48 @@
 #!/usr/bin/env bash
 #
-# cc-pool-sync — bring pool members' tooling to parity.
+# cc-pool-sync — bring pool members' tooling AND third-party logins to parity.
 #
 # Rotation members are separate config dirs, so MCP servers, plugins, and
-# skills registered on one account silently don't exist on the others — after
-# a rate-limit rotation the resumed session loses its tools.
+# skills registered on one account silently don't exist on the others — and
+# the OAuth grants behind them (Linear, Notion, ...), plugin secrets, and the
+# Chrome-extension pairing are per-dir too. Without a sync, a rotated session
+# comes back missing its tools, and the tools it keeps are logged out.
 #
 # Two modes:
 #
 #   cc-pool-sync <from-config-dir> <to-config-dir>
 #       Full additive sync: MCP server definitions (global + per-project
-#       .claude.json, needs jq), plugins (installed list + marketplaces),
-#       and skills/agents/commands dir entries. Used by cc-rotate at
-#       rotation time and by claude-session --pool-add. (Once a pool is on
-#       shared symlinked tooling, the dir copies become no-ops and only the
-#       MCP merge does work.)
+#       .claude.json, needs jq), third-party credentials cherry-picked from
+#       .credentials.json (mcpOAuth / mcpOAuthClientConfig / pluginSecrets —
+#       never the Anthropic login, see below), Chrome-extension pairing keys,
+#       plugins (installed list + marketplaces), and skills/agents/commands
+#       dir entries. Used by cc-rotate at rotation time and by claude-session
+#       --pool-add. (Once a pool is on shared symlinked tooling, the dir
+#       copies become no-ops.)
 #
 #   cc-pool-sync --push-mcp
 #       Hook mode (wired as a SessionEnd hook): push THIS config dir's MCP
-#       definitions to every other member of its pool, so servers added
-#       mid-session exist everywhere before the next launch or rotation.
-#       Reads CLAUDE_CONFIG_DIR; silently no-ops outside a pool.
+#       definitions, third-party credentials, Chrome pairing, and tooling to
+#       every other member of its pool, so servers added — or OAuth tokens
+#       refreshed — mid-session exist everywhere before the next launch or
+#       rotation. Reads CLAUDE_CONFIG_DIR; silently no-ops outside a pool.
 #
 # Additive only: nothing the target already has is deleted; the source wins
-# on key conflicts. Caches, credentials, settings.json are never touched —
-# OAuth-backed MCP servers (e.g. Linear) still need a one-time /mcp
-# authenticate under each account.
+# on key conflicts, except MCP OAuth tokens where the freshest `expiresAt`
+# wins (refresh tokens rotate on use — a stale push must never clobber a
+# fresher grant).
+#
+# HARD RULE — the Anthropic account keys in .credentials.json
+# (claudeAiOauth, trustedDeviceToken, designOauth, organizationUuid,
+# enterpriseGateway) are NEVER read, written, or copied. Each member keeps
+# its own Anthropic login; that isolation is the whole point of a pool, and
+# copying those keys is the token-sharing pattern Anthropic bans. Only
+# *third-party* grants (which belong to the same human regardless of which
+# Anthropic account is active) are synced.
+#
+# macOS caveat: there the whole credential store lives in the system
+# keychain, not .credentials.json, so credential relight is skipped —
+# authenticate once per member (`claude mcp login <server>`).
 
 set -uo pipefail
 
@@ -62,7 +79,128 @@ sync_mcp() {  # $1 = from dir, $2 = to dir
   return 1
 }
 
-# --- hook mode: push this dir's MCP defs to its pool siblings ----------------
+# Relight third-party auth: cherry-pick mcpOAuth (freshest expiresAt wins),
+# mcpOAuthClientConfig, and pluginSecrets from FROM's .credentials.json into
+# TO's. Every other key in the target — the Anthropic login included — is
+# preserved verbatim, and the write is temp-file + same-dir mv at mode 0600.
+sync_credentials() {  # $1 = from dir, $2 = to dir
+  local from="$1" to="$2" src tgt tmp n
+  src="$from/.credentials.json"; tgt="$to/.credentials.json"
+  command -v jq >/dev/null 2>&1 || {
+    warn "jq not found — third-party credentials NOT relit; run 'claude mcp login <server>' under the target account"
+    return 1
+  }
+  if [ ! -f "$src" ]; then
+    [ "$(uname -s)" = "Darwin" ] && \
+      warn "no $src (macOS keychain store) — credential relight unsupported; run 'claude mcp login <server>' per member"
+    return 0
+  fi
+  n="$(jq -r '((.mcpOAuth // {}) | length)
+            + ((.mcpOAuthClientConfig // {}) | length)
+            + ((.pluginSecrets // {}) | length)' "$src" 2>/dev/null)" || n=""
+  case "$n" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$n" -gt 0 ] || return 0
+  [ -f "$tgt" ] || ( umask 077; printf '{}\n' > "$tgt" )
+  chmod 600 "$tgt" 2>/dev/null || true
+  tmp="$(mktemp "$tgt.XXXXXX")" || return 1
+  if jq --slurpfile src "$src" '
+        def fresher($new): reduce ($new | to_entries[]) as $e (. // {};
+          if (.[$e.key] == null) or ((.[$e.key].expiresAt // 0) < ($e.value.expiresAt // 0))
+          then .[$e.key] = $e.value else . end);
+        (if ($src[0].mcpOAuth // {}) != {}
+         then .mcpOAuth = ((.mcpOAuth // {}) | fresher($src[0].mcpOAuth)) else . end) |
+        (if ($src[0].mcpOAuthClientConfig // {}) != {}
+         then .mcpOAuthClientConfig = ((.mcpOAuthClientConfig // {}) * $src[0].mcpOAuthClientConfig) else . end) |
+        (if ($src[0].pluginSecrets // {}) != {}
+         then .pluginSecrets = ((.pluginSecrets // {}) * $src[0].pluginSecrets) else . end)
+      ' "$tgt" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    chmod 600 "$tmp" 2>/dev/null || true
+    if cmp -s "$tmp" "$tgt"; then
+      rm -f "$tmp"
+    else
+      mv "$tmp" "$tgt"
+      chmod 600 "$tgt" 2>/dev/null || true
+      rm -f "$to/mcp-needs-auth-cache.json"   # freshly-relit servers shouldn't nag for auth
+      note "third-party credentials relit → ${to##*/} (MCP OAuth / plugin secrets; Anthropic login untouched)"
+    fi
+    return 0
+  fi
+  rm -f "$tmp"; warn "could not merge .credentials.json third-party keys (invalid JSON?) — skipped"
+  return 1
+}
+
+# Copy Chrome-extension pairing state from FROM's .claude.json into TO's.
+# These keys hold a local device-pairing id and installed flags — no secrets.
+# The extension still only connects when the Chrome profile's claude.ai login
+# matches the active account (upstream enforces the match), so cross-account
+# pools additionally need one Chrome profile per member; see docs/relight.md.
+sync_chrome() {  # $1 = from dir, $2 = to dir
+  local from="$1" to="$2" tgt tmp
+  command -v jq >/dev/null 2>&1 || return 1
+  [ -f "$from/.claude.json" ] || return 0
+  jq -e 'has("chromeExtension") or has("cachedChromeExtensionInstalled") or has("claudeInChromeDefaultEnabled")' \
+    "$from/.claude.json" >/dev/null 2>&1 || return 0
+  tgt="$to/.claude.json"
+  [ -f "$tgt" ] || printf '{}\n' > "$tgt"
+  tmp="$(mktemp)"
+  if jq --slurpfile src "$from/.claude.json" '
+        (if ($src[0] | has("chromeExtension")) then .chromeExtension = $src[0].chromeExtension else . end) |
+        (if ($src[0] | has("cachedChromeExtensionInstalled")) then .cachedChromeExtensionInstalled = $src[0].cachedChromeExtensionInstalled else . end) |
+        (if ($src[0] | has("claudeInChromeDefaultEnabled")) then .claudeInChromeDefaultEnabled = $src[0].claudeInChromeDefaultEnabled else . end)
+      ' "$tgt" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    if cmp -s "$tmp" "$tgt"; then rm -f "$tmp"
+    else mv "$tmp" "$tgt"; note "Chrome pairing synced → ${to##*/}"; fi
+    return 0
+  fi
+  rm -f "$tmp"; warn "could not merge .claude.json chrome keys — skipped"
+  return 1
+}
+
+# Plugins: installed list + marketplaces (skipped entirely when shared via symlink).
+sync_plugins() {  # $1 = from dir, $2 = to dir
+  local from="$1" to="$2" f m name tmp
+  [ -d "$from/plugins" ] && [ ! -L "$to/plugins" ] || return 0
+  mkdir -p "$to/plugins/marketplaces"
+  for f in installed_plugins.json known_marketplaces.json; do
+    [ -f "$from/plugins/$f" ] || continue
+    if [ -f "$to/plugins/$f" ] && command -v jq >/dev/null 2>&1; then
+      tmp="$(mktemp)"
+      if jq -s '.[0] * .[1]' "$to/plugins/$f" "$from/plugins/$f" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        mv "$tmp" "$to/plugins/$f"
+      else rm -f "$tmp"; warn "could not merge plugins/$f — left target as-is"; fi
+    else
+      cp "$from/plugins/$f" "$to/plugins/$f"
+    fi
+  done
+  if [ -d "$from/plugins/marketplaces" ]; then
+    for m in "$from/plugins/marketplaces"/*/; do
+      [ -d "$m" ] || continue
+      name="$(basename "$m")"
+      [ -e "$to/plugins/marketplaces/$name" ] || cp -R "$m" "$to/plugins/marketplaces/$name"
+    done
+  fi
+  note "plugins synced (installed list + marketplaces)"
+}
+
+# skills / agents / commands dir entries (skip symlinked = shared dirs).
+sync_dirs() {  # $1 = from dir, $2 = to dir
+  local from="$1" to="$2" d entry name synced
+  for d in skills agents commands; do
+    [ -d "$from/$d" ] || continue
+    [ -L "$to/$d" ] && continue
+    mkdir -p "$to/$d"
+    synced=0
+    for entry in "$from/$d"/*; do
+      [ -e "$entry" ] || continue
+      name="$(basename "$entry")"
+      [ -e "$to/$d/$name" ] || { cp -R "$entry" "$to/$d/$name"; synced=$((synced + 1)); }
+    done
+    [ "$synced" -gt 0 ] && note "$d/: $synced entrie(s) synced"
+  done
+  return 0
+}
+
+# --- hook mode: push this dir's state to its pool siblings --------------------
 if [ "${1:-}" = "--push-mcp" ]; then
   cat > /dev/null 2>&1 || true   # drain hook stdin
   from="${CLAUDE_CONFIG_DIR:-}"
@@ -77,7 +215,11 @@ if [ "${1:-}" = "--push-mcp" ]; then
     case "$member" in ''|\#*) continue ;; esac
     [ "$member" = "$from" ] && continue
     [ -d "$member" ] || continue
-    sync_mcp "$from" "$member" >/dev/null 2>&1 || true
+    sync_mcp         "$from" "$member" >/dev/null 2>&1 || true
+    sync_credentials "$from" "$member" >/dev/null 2>&1 || true
+    sync_chrome      "$from" "$member" >/dev/null 2>&1 || true
+    sync_plugins     "$from" "$member" >/dev/null 2>&1 || true
+    sync_dirs        "$from" "$member" >/dev/null 2>&1 || true
   done < "$pool"
   exit 0
 fi
@@ -90,43 +232,15 @@ FROM="${1:-}"; TO="${2:-}"
 # 1. MCP server definitions
 sync_mcp "$FROM" "$TO" && note "MCP server definitions synced (global + per-project)"
 
-# 2. Plugins (skip entirely when shared via symlink — already the same dir)
-if [ -d "$FROM/plugins" ] && [ ! -L "$TO/plugins" ]; then
-  mkdir -p "$TO/plugins/marketplaces"
-  for f in installed_plugins.json known_marketplaces.json; do
-    [ -f "$FROM/plugins/$f" ] || continue
-    if [ -f "$TO/plugins/$f" ] && command -v jq >/dev/null 2>&1; then
-      tmp="$(mktemp)"
-      if jq -s '.[0] * .[1]' "$TO/plugins/$f" "$FROM/plugins/$f" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-        mv "$tmp" "$TO/plugins/$f"
-      else rm -f "$tmp"; warn "could not merge plugins/$f — left target as-is"; fi
-    else
-      cp "$FROM/plugins/$f" "$TO/plugins/$f"
-    fi
-  done
-  if [ -d "$FROM/plugins/marketplaces" ]; then
-    for m in "$FROM/plugins/marketplaces"/*/; do
-      [ -d "$m" ] || continue
-      name="$(basename "$m")"
-      [ -e "$TO/plugins/marketplaces/$name" ] || cp -R "$m" "$TO/plugins/marketplaces/$name"
-    done
-  fi
-  note "plugins synced (installed list + marketplaces)"
-fi
+# 2. Third-party auth relight (MCP OAuth tokens, plugin secrets) + Chrome pairing
+sync_credentials "$FROM" "$TO" || true
+sync_chrome "$FROM" "$TO" || true
 
-# 3. skills / agents / commands (skip symlinked = shared dirs)
-for d in skills agents commands; do
-  [ -d "$FROM/$d" ] || continue
-  [ -L "$TO/$d" ] && continue
-  mkdir -p "$TO/$d"
-  synced=0
-  for entry in "$FROM/$d"/*; do
-    [ -e "$entry" ] || continue
-    name="$(basename "$entry")"
-    [ -e "$TO/$d/$name" ] || { cp -R "$entry" "$TO/$d/$name"; synced=$((synced + 1)); }
-  done
-  [ "$synced" -gt 0 ] && note "$d/: $synced entrie(s) synced"
-done
+# 3. Plugins
+sync_plugins "$FROM" "$TO"
 
-note "${DIM}done — OAuth-backed MCP servers still need /mcp authenticate on the target account${RESET}"
+# 4. skills / agents / commands
+sync_dirs "$FROM" "$TO"
+
+note "${DIM}done — Anthropic logins stay isolated per account (never copied)${RESET}"
 exit 0

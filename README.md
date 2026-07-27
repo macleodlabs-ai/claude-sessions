@@ -165,8 +165,16 @@ The switch is seamless by design:
   them. MCP server *definitions* live inside each account's `.claude.json`
   next to its login state, so they're synced instead of shared: on every
   rotation, at `--pool-add`, and via a `SessionEnd` hook whenever any session
-  closes. OAuth-backed MCP servers (e.g. Linear) still need a one-time `/mcp`
-  authenticate on each account.
+  closes.
+- **Third-party logins survive** — the same three sync moments also relight
+  auth: OAuth tokens for MCP servers (e.g. Linear), plugin secrets, and the
+  Chrome-extension pairing are cherry-picked across the pool (freshest token
+  wins), so authenticating a server once on *any* member covers all of them.
+  Each account's own **Anthropic login is never copied** — that isolation is
+  the point of the pool. Exceptions: macOS keeps credentials in the keychain,
+  out of the sync's reach (authenticate once per member there), and the
+  Chrome extension additionally requires the browser profile's claude.ai
+  login to match the active account — see `docs/relight.md`.
 
 ```bash
 claude-session --pool-add macleod      # add another account (macleod-3, ...)
@@ -255,7 +263,7 @@ If the footer is blank or wrong, quit and relaunch with `cc-<client>`.
 | `No conversation found with session ID` after a switch | The pool dirs must share history — `claude-session --pool-list <client>` should show every member; re-run `--pool-add` wiring by checking each dir's `projects` is a symlink into `~/.claude-shared/pools/` |
 | Pool member shows `NO CREDENTIALS` | `claude-session --login <member>`, then `/login` inside the session |
 | Resumed session lost MCP servers / plugins after a switch | The pool predates tooling sharing — run `~/.claude-shared/cc-pool-sync <primary-dir> <member-dir>` once per member (pools created by the current `--pool-add` get sharing automatically) |
-| An OAuth MCP server (e.g. Linear) shows disconnected on one account | Expected — logins are per account. Open `/mcp` there and authenticate once |
+| An OAuth MCP server (e.g. Linear) shows disconnected on one account | Authenticate once on any member (`/mcp` or `claude mcp login <server>`) — the token fans out at the next session end / rotation / `cc-pool-sync` run. Still stuck: on macOS the credential store is the keychain, which the sync can't reach — authenticate once per member there |
 
 ---
 

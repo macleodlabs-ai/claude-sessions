@@ -65,8 +65,9 @@ WANT_RC=0
 for dir in "${DIRS[@]}"; do
   label="${dir##*/}"
   # Tooling parity: MCP servers, plugins, and skills registered on the account
-  # we're leaving must exist on the one we're entering, or the resumed session
-  # comes back without its tools.
+  # we're leaving must exist on the one we're entering — with their third-party
+  # logins (MCP OAuth tokens, plugin secrets, Chrome pairing) relit — or the
+  # resumed session comes back without its tools, or with them logged out.
   if [ -n "$LAST_DIR" ] && [ -x "${SHARED_DIR}/cc-pool-sync" ]; then
     "${SHARED_DIR}/cc-pool-sync" "$LAST_DIR" "$dir" || warn "tooling sync failed — continuing anyway"
   fi
