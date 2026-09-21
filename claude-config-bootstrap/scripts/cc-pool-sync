@@ -23,7 +23,10 @@
 #       Reads CLAUDE_CONFIG_DIR; silently no-ops outside a pool.
 #
 # Additive only: nothing the target already has is deleted; the source wins
-# on key conflicts. Caches, credentials, settings.json are never touched —
+# on key conflicts. Caches and credentials are never touched, and of
+# settings.json only the `enabledPlugins` key is merged (an installed plugin
+# is inert until it is enabled there, so copying the installed list alone
+# delivered every plugin switched off) —
 # OAuth-backed MCP servers (e.g. Linear) still need a one-time /mcp
 # authenticate under each account.
 
@@ -112,6 +115,23 @@ if [ -d "$FROM/plugins" ] && [ ! -L "$TO/plugins" ]; then
     done
   fi
   note "plugins synced (installed list + marketplaces)"
+fi
+
+# 2b. Plugin enablement. Only the `enabledPlugins` key of settings.json is
+# read or written, nothing else in that file (it can hold env secrets).
+# Source wins on conflicts, like everything above, so both accounts end up
+# with the same plugins switched on.
+if [ -f "$FROM/settings.json" ] && [ ! -L "$TO/settings.json" ] && command -v jq >/dev/null 2>&1; then
+  if jq -e '.enabledPlugins | type == "object"' "$FROM/settings.json" >/dev/null 2>&1; then
+    [ -f "$TO/settings.json" ] || printf '{}\n' > "$TO/settings.json"
+    tmp="$(mktemp)"
+    if jq --slurpfile src "$FROM/settings.json" \
+          '.enabledPlugins = ((.enabledPlugins // {}) * $src[0].enabledPlugins)' \
+          "$TO/settings.json" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+      cat "$tmp" > "$TO/settings.json"; rm -f "$tmp"
+      note "plugin enablement synced (settings.json enabledPlugins only)"
+    else rm -f "$tmp"; warn "could not merge enabledPlugins — left target settings.json as-is"; fi
+  fi
 fi
 
 # 3. skills / agents / commands (skip symlinked = shared dirs)

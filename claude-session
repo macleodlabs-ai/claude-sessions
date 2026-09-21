@@ -19,6 +19,8 @@
 #
 # Flags:
 #   --create NAME...     Bootstrap each client (config dir, memory, statusline, launcher).
+#                        Launchers default to --permission-mode auto; an explicit
+#                        --permission-mode or --dangerously-skip-permissions wins.
 #   --delete NAME...     Remove each client's config dir and launcher.
 #   --list               Show configured clients.
 #   --pool-add CLIENT    Add the next rotation account (<client>-2, -3, ...) to CLIENT's
@@ -130,11 +132,13 @@ build_block() {  # prints the rc block for the current CC_DIRS
   printf '# run `claude-session --create/--delete` to refresh, `--revert` to remove.\n'
   # Each launcher checks for a rotation pool at runtime: with a pool file the
   # cc-rotate supervisor takes over (rotate accounts on rate limit); without
-  # one it launches claude directly, exactly as before.
+  # one it launches claude directly. Either way the session runs in auto
+  # permission mode unless the caller passed a mode of their own
+  # (`--permission-mode X` or `--dangerously-skip-permissions`).
   local d
   for d in "${CC_DIRS[@]}"; do
-    printf '%s() { if [ -f %q ]; then %q %q "$@"; else CLAUDE_CONFIG_DIR=%q command claude "$@"; fi; }\n' \
-      "$(fn_label "$d")" "$POOLS_DIR/$(basename "$d").pool" "$SHARED_DIR/cc-rotate" "$(basename "$d")" "$d"
+    printf '%s() { if [ -f %q ]; then %q %q "$@"; else case " $* " in *" --permission-mode"*|*" --dangerously-skip-permissions"*) CLAUDE_CONFIG_DIR=%q command claude "$@" ;; *) CLAUDE_CONFIG_DIR=%q command claude --permission-mode auto "$@" ;; esac; fi; }\n' \
+      "$(fn_label "$d")" "$POOLS_DIR/$(basename "$d").pool" "$SHARED_DIR/cc-rotate" "$(basename "$d")" "$d" "$d"
   done
   # Global, auto-sourcing wrapper: runs the installed CLI then reloads this shell
   # so freshly-added cc-<client> launchers are usable immediately.
@@ -463,7 +467,7 @@ cmd_create() {
   for n in "${NAMES[@]}"; do
     [ -n "$n" ] || continue
     printf "\n${BOLD}• %s${RESET}\n" "$n"
-    bash "$setup" --client "$n" --clients-parent "$CLIENTS_PARENT" --shared-dir "$SHARED_DIR"
+    env -u CLAUDE_CONFIG_DIR bash "$setup" --client "$n" --clients-parent "$CLIENTS_PARENT" --shared-dir "$SHARED_DIR"
   done
   hdr "Shell launchers"
   rebuild_launchers

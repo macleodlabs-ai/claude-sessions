@@ -38,7 +38,7 @@ For each **config dir** (one per client/account, e.g. `~/.claude-clients/macleod
 
 | Piece | Path | Purpose |
 |---|---|---|
-| Launcher block | `~/.zshrc` or `~/.bashrc` | `cc-<client>` functions that set the env var and launch; neutered bare `claude`; a global, auto-sourcing `claude-session` command |
+| Launcher block | `~/.zshrc` or `~/.bashrc` | `cc-<client>` functions that set the env var and launch in auto permission mode (an explicit `--permission-mode`/`--dangerously-skip-permissions` wins); neutered bare `claude`; a global, auto-sourcing `claude-session` command |
 
 The result is a **three-tier memory stack** inside any repo:
 
