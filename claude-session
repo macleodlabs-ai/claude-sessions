@@ -467,7 +467,7 @@ cmd_create() {
   for n in "${NAMES[@]}"; do
     [ -n "$n" ] || continue
     printf "\n${BOLD}• %s${RESET}\n" "$n"
-    bash "$setup" --client "$n" --clients-parent "$CLIENTS_PARENT" --shared-dir "$SHARED_DIR"
+    env -u CLAUDE_CONFIG_DIR bash "$setup" --client "$n" --clients-parent "$CLIENTS_PARENT" --shared-dir "$SHARED_DIR"
   done
   hdr "Shell launchers"
   rebuild_launchers
