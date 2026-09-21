@@ -79,6 +79,14 @@ claude-session --delete clientA     # remove one or more clients (prompts first)
 Every subcommand is idempotent and refreshes the launchers from the live set of
 clients (the shell reloads automatically).
 
+### Permission mode
+
+Every `cc-<client>` launch runs in **auto** permission mode (`--permission-mode
+auto`): a safety classifier approves routine actions instead of prompting for
+each one. Pass a mode yourself and it wins — `cc-acme --permission-mode plan`,
+or `cc-acme --dangerously-skip-permissions`. Rotations keep whatever mode the
+session started with.
+
 ## Rate-limit rotation (pools)
 
 A client can have a **rotation pool**: extra accounts (each with its own
@@ -159,13 +167,18 @@ The switch is seamless by design:
   and sat waiting until you typed `continue`).
 - **Remote Control survives** — if `/remote-control` was active when the
   limit hit, the relaunch passes `--remote-control` and re-pairs automatically.
+  The whole transcript is searched for that state, since the status line is
+  written once and can sit hundreds of megabytes back in a long session.
 - **Tools survive** — `skills/`, `plugins/`, `agents/`, and `commands/` are
   shared across the pool via symlinks (exactly like session history), so
   anything added mid-session on one account is instantly available on all of
   them. MCP server *definitions* live inside each account's `.claude.json`
   next to its login state, so they're synced instead of shared: on every
   rotation, at `--pool-add`, and via a `SessionEnd` hook whenever any session
-  closes. OAuth-backed MCP servers (e.g. Linear) still need a one-time `/mcp`
+  closes. Which plugins are *switched on* lives in each account's
+  `settings.json`, so the rotation also merges that one key (`enabledPlugins`,
+  nothing else in the file) — otherwise plugins arrive installed but off.
+  OAuth-backed MCP servers (e.g. Linear) still need a one-time `/mcp`
   authenticate on each account.
 
 ```bash

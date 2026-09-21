@@ -73,14 +73,23 @@ for dir in "${DIRS[@]}"; do
   export CLAUDE_CONFIG_DIR="$dir"
   LAST_DIR="$dir"
 
+  # Every launch runs in auto permission mode unless the caller picked a mode
+  # (`--permission-mode X` or `--dangerously-skip-permissions`) themselves.
+  # This also keeps `args` non-empty: macOS ships bash 3.2, where expanding an
+  # empty array under `set -u` dies with "args[@]: unbound variable", so a
+  # bare `cc-<client>` with no flags failed before claude ever started.
   args=()
+  case " $* " in
+    *" --permission-mode"*|*" --dangerously-skip-permissions"*) : ;;
+    *) args+=(--permission-mode auto) ;;
+  esac
   if [ -n "$SESSION_ID" ]; then
     args+=(--resume "$SESSION_ID")
     note "switching to ${BOLD}${label}${RESET} and resuming session ${SESSION_ID}"
   else
     note "launching on ${BOLD}${label}${RESET}"
   fi
-  args+=("$@")
+  [ "$#" -gt 0 ] && args+=("$@")
   if [ -n "$SESSION_ID" ]; then
     # Auto-submit a turn on rotation resumes. A bare `--resume` only renders the
     # old transcript — whose tail is the previous account's rate-limit failure —
@@ -121,10 +130,13 @@ for dir in "${DIRS[@]}"; do
   latest="$(ls -t "$PROJECTS"/*/*.jsonl 2>/dev/null | head -n 1 || true)"
   if [ -n "$latest" ]; then
     SESSION_ID="$(basename "$latest" .jsonl)"
-    # Was Remote Control on when the session died? The transcript logs bridge
-    # status lines; the last remote-control one tells us the final state.
-    if tail -c 2000000 "$latest" 2>/dev/null \
-        | grep '"subtype":"bridge_status"' | grep 'remote-control' | tail -n 1 \
+    # Was Remote Control on when the session died? The transcript logs a bridge
+    # status line when it starts, once, and never again — so it can sit hundreds
+    # of megabytes before the end of a long session. Scan the whole file: grep
+    # over 100 MB is well under a second, and a 2 MB tail missed it (2026-09-21,
+    # a 109 MB transcript whose only "is active" line was a day old).
+    if grep '"subtype":"bridge_status"' "$latest" 2>/dev/null \
+        | grep 'remote-control' | tail -n 1 \
         | grep -q 'remote-control is active'; then
       WANT_RC=1
     else
