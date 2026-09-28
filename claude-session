@@ -10,6 +10,7 @@
 #   claude-session --create macleod clientA   # add one or more clients
 #   claude-session --delete clientA           # remove one or more clients
 #   claude-session --list                     # list configured clients
+#   claude-session --browser-sync ARGS...     # optional Mac browser handoff
 #   claude-session --pool-add macleod         # add a rotation account to a client
 #   claude-session --pool-list macleod        # show a client's rotation pool
 #   claude-session --pool-remove macleod-2    # remove a rotation account
@@ -23,6 +24,7 @@
 #                        --permission-mode or --dangerously-skip-permissions wins.
 #   --delete NAME...     Remove each client's config dir and launcher.
 #   --list               Show configured clients.
+#   --browser-sync ...   Experimental browser handoff; see browser-sync/README.md.
 #   --pool-add CLIENT    Add the next rotation account (<client>-2, -3, ...) to CLIENT's
 #                        pool and walk you through logging it in. cc-<client> then
 #                        auto-rotates to the next account on a rate limit, resuming
@@ -60,6 +62,14 @@ die()  { err "$1"; exit "${2:-1}"; }
 
 # --- paths & config --------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# This optional component has its own parser; account paths/emails must not be
+# passed through the client-name sanitizer below.
+if [ "${1:-}" = "--browser-sync" ]; then
+  shift
+  command -v python3 >/dev/null 2>&1 || die "Browser sync requires Python 3.9+"
+  [ -f "$SCRIPT_DIR/browser-sync/cc-browser-sync.py" ] || die "Browser sync is not installed; run this from the updated repository"
+  exec python3 "$SCRIPT_DIR/browser-sync/cc-browser-sync.py" "$@"
+fi
 SHARED_DIR="${SHARED_DIR:-$HOME/.claude-shared}"
 CLIENTS_PARENT="${CLIENTS_PARENT:-$HOME/.claude-clients}"
 SKILLS_DIR="${SKILLS_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills}"
@@ -83,7 +93,7 @@ fi
 
 # --- arg parsing -----------------------------------------------------------
 MODE=""; FORCE=0; ASSUME_YES=0; declare -a NAMES=()
-print_help() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; }
+print_help() { sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d;s/^# \{0,1\}//'; }
 sanitize() { printf '%s' "$1" | tr -cd '[:alnum:]_-'; }
 
 while [ $# -gt 0 ]; do
@@ -212,6 +222,13 @@ install_skill() {  # copy the skill into the skills dir so Claude can trigger it
 
 install_cli() {  # make `claude-session` globally available
   mkdir -p "$SHARED_DIR"
+  # Copy optional browser-sync sources only. No hooks/native host are enabled.
+  if [ -d "$SCRIPT_DIR/browser-sync" ] && [ "$SCRIPT_DIR" != "$SHARED_DIR" ]; then
+    mkdir -p "$SHARED_DIR/browser-sync"
+    cp "$SCRIPT_DIR/browser-sync/cc-browser-sync.py" "$SCRIPT_DIR/browser-sync/keychain.swift" "$SCRIPT_DIR/browser-sync/README.md" "$SHARED_DIR/browser-sync/"
+    mkdir -p "$SHARED_DIR/browser-sync/extension"
+    cp "$SCRIPT_DIR/browser-sync/extension/"* "$SHARED_DIR/browser-sync/extension/"
+  fi
   if [ ! "$0" -ef "$CLI_INSTALL_PATH" ]; then
     cp "$0" "$CLI_INSTALL_PATH"; chmod +x "$CLI_INSTALL_PATH"
     ok "Installed command → $CLI_INSTALL_PATH"
@@ -690,6 +707,10 @@ cmd_revert() {
     info "Removing tooling only — client account dirs are kept (use --force to delete them too)."
   fi
   confirm "Remove launchers, the global command, and $SHARED_DIR?" || { info "Aborted. Nothing changed."; exit 0; }
+
+  if [ -f "$SHARED_DIR/browser-sync/state/config.json" ]; then
+    python3 "$SHARED_DIR/browser-sync/cc-browser-sync.py" disable || die "Disable browser sync before reverting"
+  fi
 
   apply_block "" || true
   ok "Removed launcher block ($RC_FILE) — bare 'claude' restored (backup: ${RC_FILE}.ccbak)"
