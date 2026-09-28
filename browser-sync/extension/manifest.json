@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Claude Sessions Browser Sync (Experimental)",
+  "version": "0.1.0",
+  "description": "Coordinate one Chrome profile with isolated Claude Code sessions. Requires the Mac helper.",
+  "permissions": ["cookies", "storage", "tabs", "nativeMessaging", "alarms"],
+  "host_permissions": ["https://claude.ai/*", "https://*.claude.ai/*"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "action": {"default_popup": "popup.html", "default_title": "Claude Sessions Browser Sync"}
+}

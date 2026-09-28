@@ -87,6 +87,22 @@ each one. Pass a mode yourself and it wins — `cc-acme --permission-mode plan`,
 or `cc-acme --dangerously-skip-permissions`. Rotations keep whatever mode the
 session started with.
 
+## Optional browser account handoff (Mac, experimental)
+
+Already using these terminal sessions through Claude Mobile Remote Control?
+The opt-in [browser-sync companion](browser-sync/README.md) can use each session's
+`CLAUDE_CONFIG_DIR` to prepare the matching Claude website login in one Chrome
+profile. It coordinates browser ownership across sessions and stores browser
+snapshots in macOS Keychain.
+
+**Official Claude extension account switching is not yet validated.** The first
+browser request of each turn stays blocked until you check the official
+extension's account on the Mac and confirm it in the companion. This is an
+experimental integration with a manual verification gate, not unattended sync.
+Normal launchers and accounts are unchanged unless explicitly enrolled.
+
+See [installation, recovery and Mac acceptance checks](browser-sync/README.md).
+
 ## Rate-limit rotation (pools)
 
 A client can have a **rotation pool**: extra accounts (each with its own

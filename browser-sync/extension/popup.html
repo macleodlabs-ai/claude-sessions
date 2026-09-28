@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Claude Sessions Browser Sync</title>
+<style>body{font:14px system-ui;width:340px;padding:16px;background:#161321;color:#f3edf9}h1{font-size:18px}label{display:block;margin:14px 0 5px}input,button{box-sizing:border-box;width:100%;padding:9px;margin:4px 0}button{background:#a990ff;border:0;border-radius:5px;cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere}small{color:#c9bfd7}#confirm-box{border-top:1px solid #675976;margin-top:16px}</style></head>
+<body><h1>Claude Sessions Browser Sync</h1><small>Experimental · one browser owner at a time</small>
+<pre id="status">Connecting to Mac helper…</pre>
+<div id="confirm-box" hidden><p>Open the <strong>official Claude extension</strong> and check its account. Sign in there if necessary. Website login alone does not prove the extension switched.</p>
+<label for="email">Type the email you verified in the official extension</label><input id="email" type="email" autocomplete="off"><button id="confirm">Confirm checked account</button></div>
+<label for="alias">Register current Claude website login</label><input id="alias" placeholder="Account alias, e.g. macleod" autocomplete="off"><button id="save">Save login to Mac Keychain</button>
+<button id="new-login">Add another login</button>
+<button id="refresh">Refresh status</button><pre id="message" role="status"></pre>
+<script src="popup.js"></script></body></html>

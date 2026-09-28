@@ -14,3 +14,9 @@
 # Scratch / unpacked skill working dirs
 /tmp/skillwork/
 skillwork/
+
+# Browser-sync runtime / compiled helper
+browser-sync/state/
+browser-sync/keychain
+__pycache__/
+*.browser-sync.bak
