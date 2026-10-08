@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+#
+# cc-member — direct launcher for one rotation-pool member account.
+#
+# Backs the cc-<client>-N launchers (e.g. cc-macleod-2), named like the
+# footer label so you can run any account in a pool by the name you see.
+# Unlike cc-<client>, it never rotates: the session stays on this account.
+#
+# Everything is done for you:
+#   1. Not logged in?  Runs `claude auth login` in this account's config dir,
+#      reminding you to pick a DIFFERENT subscription than the primary's.
+#   2. Same subscription as the primary?  Warns (rotation would gain nothing).
+#   3. Brings MCP/plugin/skill definitions to parity with the primary.
+#   4. Launches claude (auto permission mode unless you passed a mode).
+#
+# Shared pool history means `cc-<client>-N --resume` sees the same
+# conversations as cc-<client>.
+#
+# Usage: cc-member <member-config-dir> [claude args...]
+#   (normally invoked by the cc-<client>-N launcher, not by hand)
+
+set -uo pipefail
+
+if [ -t 2 ]; then
+  BOLD=$'\033[1m'; RESET=$'\033[0m'
+  RED=$'\033[31m'; YELLOW=$'\033[33m'; CYAN=$'\033[36m'; GREEN=$'\033[32m'
+else BOLD=""; RESET=""; RED=""; YELLOW=""; CYAN=""; GREEN=""; fi
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SHARED_DIR="${SHARED_DIR:-$SCRIPT_DIR}"
+POOL_MARKER=".ccb-pool-member"
+
+DIR="${1:-}"
+[ -n "$DIR" ] || { printf "${RED}cc-member: usage: cc-member <member-config-dir> [claude args...]${RESET}\n" >&2; exit 2; }
+shift
+LABEL="cc-${DIR##*/}"
+note() { printf "${CYAN}%s:${RESET} %s\n" "$LABEL" "$1" >&2; }
+warn() { printf "${YELLOW}%s:${RESET} %s\n" "$LABEL" "$1" >&2; }
+fail() { printf "${RED}${BOLD}%s: %s${RESET}\n" "$LABEL" "$1" >&2; }
+
+[ -d "$DIR" ] || { fail "config dir missing: $DIR"; exit 2; }
+command -v claude >/dev/null 2>&1 || { fail "claude is not on PATH"; exit 127; }
+PRIMARY="$(cat "$DIR/$POOL_MARKER" 2>/dev/null || true)"
+PRIMARY_DIR="$(dirname "$DIR")/$PRIMARY"
+
+# A direct member session must never rotate, even if started from a shell
+# that a cc-rotate supervisor exported this into.
+unset CC_ROTATE_ACTIVE CC_ROTATE_PIDFILE
+export CLAUDE_CONFIG_DIR="$DIR"
+
+auth_email() {  # $1 = config dir: logged-in account email ("" if none)
+  CLAUDE_CONFIG_DIR="$1" command claude auth status --json 2>/dev/null \
+    | sed -n 's/.*"email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+}
+
+# 1. Log in if needed.
+if ! command claude auth status >/dev/null 2>&1; then
+  note "this account isn't logged in yet — starting login."
+  [ -n "$PRIMARY" ] && note "Sign in with a ${BOLD}DIFFERENT${RESET} subscription than '$PRIMARY' uses; if the browser picks your usual account, switch accounts on the OAuth page."
+  command claude auth login
+  if ! command claude auth status >/dev/null 2>&1; then
+    fail "still not logged in — run $LABEL again to retry."
+    exit 1
+  fi
+  printf "${GREEN}%s:${RESET} logged in.\n" "$LABEL" >&2
+fi
+
+# 2. Same subscription as the primary defeats the pool — say so.
+if [ -n "$PRIMARY" ] && [ -d "$PRIMARY_DIR" ]; then
+  me="$(auth_email "$DIR")"; them="$(auth_email "$PRIMARY_DIR")"
+  if [ -n "$me" ] && [ "$me" = "$them" ]; then
+    warn "logged in as the same account as '$PRIMARY' ($me) — rotation gains nothing."
+    warn "Switch it with: claude-session --login ${DIR##*/}"
+  fi
+fi
+
+# 3. Tooling parity with the primary (additive; same sync cc-rotate does).
+if [ -d "$PRIMARY_DIR" ] && [ -x "$SHARED_DIR/cc-pool-sync" ]; then
+  "$SHARED_DIR/cc-pool-sync" "$PRIMARY_DIR" "$DIR" >/dev/null 2>&1 || warn "tooling sync failed — continuing anyway"
+fi
+
+# 4. Launch. Auto permission mode unless the caller chose a mode. Keeping
+# `args` non-empty also sidesteps bash 3.2's empty-array `set -u` crash.
+args=()
+case " $* " in
+  *" --permission-mode"*|*" --dangerously-skip-permissions"*) : ;;
+  *) args+=(--permission-mode auto) ;;
+esac
+[ "$#" -gt 0 ] && args+=("$@")
+exec claude "${args[@]}"

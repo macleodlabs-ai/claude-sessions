@@ -62,11 +62,13 @@ claude-session --pool-list <client>    # members, order, login state
 claude-session --login <name>          # (re)log in an account by name; a pooled
                                        # client name logs in every member missing creds
 claude-session --pool-remove <name>    # remove a member; last removal disbands
+cc-<client>-N                          # run one member directly (logs in first if needed; no rotation)
 ```
 
 Two things to tell the user every time:
 1. The new member must be logged into a **different** subscription than the
-   primary (the `/login` at the end of `--pool-add` is where that happens).
+   primary (the login at the end of `--pool-add`, or the first run of
+   `cc-<client>-N`, is where that happens).
 2. This rotates the user's **own** accounts via the genuine claude binary — no
    token extraction or proxying — but rotating to extend usage is a gray area
    in Anthropic's terms; keep it to human-paced, interactive use.
