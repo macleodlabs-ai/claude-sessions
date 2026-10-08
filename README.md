@@ -128,22 +128,30 @@ directly — zero behavior change.
 
 There's no separate "linking" step: a pool member is just an isolated config
 dir, and it's connected the moment you log a subscription into it. At the end
-of `--pool-add` you land in Claude Code under the new dir:
+of `--pool-add` (or the first time you run `cc-macleod-2`) Claude's login flow
+opens for the new dir:
 
-1. Run `/login` if you're not prompted automatically.
-2. In the browser OAuth page, **sign into your *second* Anthropic account** —
+1. In the browser OAuth page, **sign into your *second* Anthropic account** —
    the new Pro/Max subscription, *not* the one macleod already uses. If the
    browser auto-picks your usual account, switch accounts on that page.
    (Reusing the same account would mean both pool members share one rate
    limit — pointless.)
-3. Exit Claude. Done — credentials live in `~/.claude-clients/macleod-2`,
-   isolated exactly like your other clients.
+2. You're back in the terminal. Done — credentials live in
+   `~/.claude-clients/macleod-2`, isolated exactly like your other clients.
 
-Quit before finishing, or want to re-login later? No config dir to remember —
-just name the account:
+Every pool member gets its own launcher, named like the label in its footer:
 
 ```bash
-claude-session --login macleod-2   # relaunch the login for one account
+cc-macleod-2          # logs in first if needed, then a session on account #2
+cc-macleod-2 --resume # same shared history as cc-macleod, so resume works
+```
+
+It never rotates (use `cc-macleod` for that), brings the member's MCP/plugin
+setup level with the primary before launching, and warns if the member is
+signed into the same account as the primary. To re-login on purpose:
+
+```bash
+claude-session --login macleod-2   # rerun the login for one account
 claude-session --login macleod     # log in EVERY pool member still missing credentials
 ```
 
@@ -185,6 +193,7 @@ The switch is seamless by design:
 claude-session --pool-add macleod      # add another account (macleod-3, ...)
 claude-session --pool-list macleod     # members, rotation order, login state
 claude-session --login macleod-2       # (re)log in an account by name
+cc-macleod-2                           # run account #2 directly (no rotation)
 claude-session --pool-remove macleod-2 # remove an account (prompts first)
 ```
 
@@ -266,7 +275,7 @@ If the footer is blank or wrong, quit and relaunch with `cc-<client>`.
 | Footer didn't change after setup | Quit Claude and relaunch with `cc-<client>` |
 | Rotation didn't fire on a rate limit | Check the pool member's `settings.json` has the `StopFailure` hook and that you launched via `cc-<client>` (direct `claude` runs never rotate — that's the safety gate) |
 | `No conversation found with session ID` after a switch | The pool dirs must share history — `claude-session --pool-list <client>` should show every member; re-run `--pool-add` wiring by checking each dir's `projects` is a symlink into `~/.claude-shared/pools/` |
-| Pool member shows `NO CREDENTIALS` | `claude-session --login <member>`, then `/login` inside the session |
+| Pool member shows `NO CREDENTIALS` | Run its launcher (`cc-<member>`, e.g. `cc-macleod-2`) — it logs in first |
 | Resumed session lost MCP servers / plugins after a switch | The pool predates tooling sharing — run `~/.claude-shared/cc-pool-sync <primary-dir> <member-dir>` once per member (pools created by the current `--pool-add` get sharing automatically) |
 | An OAuth MCP server (e.g. Linear) shows disconnected on one account | Expected — logins are per account. Open `/mcp` there and authenticate once |
 

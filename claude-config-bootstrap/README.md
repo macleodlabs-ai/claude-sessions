@@ -200,7 +200,8 @@ walkthrough is in the repo README; this section is the reference.
 | Hook helper | `~/.claude-shared/cc-rotate-kill` | `StopFailure` hook target; signals the supervisor and TERMs claude |
 | Pool file | `~/.claude-shared/pools/<client>.pool` | Ordered list of config-dir paths — rotation order, primary first |
 | Shared history | `~/.claude-shared/pools/<client>-projects/` | The pool's one real `projects/` dir; every member's `projects` is a symlink to it |
-| Member marker | `<member-dir>/.ccb-pool-member` | Contains the primary's name; tells the CLI this dir is a pool member, not a standalone client (no `cc-` launcher is generated for it) |
+| Member launcher | `~/.claude-shared/cc-member` | Backs each member's `cc-<client>-N` launcher: logs the account in if needed (`claude auth login`), warns if it shares the primary's account, syncs tooling from the primary, then launches without rotation |
+| Member marker | `<member-dir>/.ccb-pool-member` | Contains the primary's name; tells the CLI this dir is a pool member, not a standalone client (it gets a direct `cc-<client>-N` launcher, not a rotating one) |
 
 **Detection.** Each pool dir's `settings.json` gets a `hooks.StopFailure` block
 with matchers `rate_limit` and `billing_error` pointing at `cc-rotate-kill`
@@ -211,8 +212,8 @@ that merely mentions rate limits.
 
 **The gate.** `cc-rotate-kill` is a silent no-op unless `CC_ROTATE_ACTIVE=1`
 and a live supervisor pid file are present in the environment — both are set
-only by `cc-rotate`. So the hook is harmless when a pool dir is launched
-directly (e.g. for `/login`), and plain `cc-<client>` sessions without a pool
+only by `cc-rotate` (`cc-member` explicitly unsets it). So the hook is harmless
+when a pool dir is launched directly (e.g. via `cc-macleod-2`), and plain `cc-<client>` sessions without a pool
 never rotate.
 
 **Why the history symlinks are load-bearing.** `claude --resume <id>` looks the
@@ -296,7 +297,9 @@ claude-config-bootstrap/
 └── scripts/
     ├── setup.sh         # The idempotent per-config-dir setup script
     ├── cc-rotate        # Rotation supervisor (installed to ~/.claude-shared by the CLI)
-    └── cc-rotate-kill   # StopFailure hook helper (installed alongside it)
+    ├── cc-rotate-kill   # StopFailure hook helper (installed alongside it)
+    ├── cc-pool-sync     # Tooling parity between pool members
+    └── cc-member        # Direct, non-rotating launcher for one pool member
 ```
 
 `SKILL.md` is what Claude reads to decide when to run this; `README.md` is for you. `setup.sh` configures one config dir; the `cc-rotate` pair powers the optional rate-limit rotation pools managed by the `claude-session` CLI.
