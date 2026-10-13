@@ -6,6 +6,8 @@
 # account hits its rate limit, a StopFailure hook (cc-rotate-kill) signals this
 # supervisor, which relaunches under the NEXT account in the pool with
 # `--resume <session-id>` — same conversation, different subscription, ~2s gap.
+# The pool wraps around; it stops only when every account is limited in a row.
+# `/rotate [member]` or `cc-rotate-now` triggers the same switch by hand.
 #
 # Every request is made by the genuine `claude` binary using that account's own
 # OAuth login. No tokens are extracted, shared, or proxied.
@@ -51,23 +53,53 @@ done < "$POOL_FILE"
 # Wiring for the StopFailure hook: the hook reads our pid file (path exported
 # below), touches "<pidfile>.rotate", and TERMs the claude process. We rotate
 # only when that flag exists; any other exit passes straight through.
+# cc-rotate-now writes "manual:[member]" into the same flag for a manual
+# rotation (an empty flag, from the hook, means rate limit). The run file lets
+# `cc-rotate-now --client <client>` find this supervisor from another terminal.
 PIDFILE="$(mktemp "${TMPDIR:-/tmp}/cc-rotate.XXXXXX")"
 ROTATE_FLAG="${PIDFILE}.rotate"
+RUN_FILE="${POOLS_DIR}/run/${CLIENT}.$$"
+mkdir -p "${POOLS_DIR}/run" && printf '%s\n' "$PIDFILE" > "$RUN_FILE"
 export CC_ROTATE_PIDFILE="$PIDFILE"
 export CC_ROTATE_ACTIVE=1
-trap 'rm -f "$PIDFILE" "$ROTATE_FLAG"' EXIT
+trap 'rm -f "$PIDFILE" "$ROTATE_FLAG" "$RUN_FILE"' EXIT
 trap '' INT   # Ctrl+C belongs to claude; we exit when it does
+
+# Each dir may pin the account it must be logged into (.ccb-account, an email;
+# set with `claude-session --pin`). A /login typed inside a rotated session
+# saves to whichever account is active, so a pin is how a dir that drifted to
+# another subscription gets caught instead of silently double-spending one.
+account_email() { command -v jq >/dev/null 2>&1 && jq -r '.oauthAccount.emailAddress // ""' "$1/.claude.json" 2>/dev/null; }
+pin_ok() {  # $1 = dir: 0 if unpinned, jq missing, or logged into the pinned account
+  local pinned actual
+  pinned="$(cat "$1/.ccb-account" 2>/dev/null || true)"
+  [ -n "$pinned" ] && command -v jq >/dev/null 2>&1 || return 0
+  actual="$(account_email "$1")"
+  [ "$actual" = "$pinned" ] && return 0
+  fail "${1##*/} is logged in as ${actual:-nobody} but pinned to ${pinned} — skipping it."
+  warn "Fix: claude-session --login ${1##*/}"
+  return 1
+}
 
 SESSION_ID=""
 LAST_DIR=""
 STATUS=0
 WANT_RC=0
-for dir in "${DIRS[@]}"; do
+MANUAL=0      # last rotation was manual: resume without an auto-submitted turn
+LIMITED=0     # consecutive rate-limit rotations; = pool size means every account is limited
+N="${#DIRS[@]}"
+i=0
+while :; do
+  dir="${DIRS[$i]}"
   label="${dir##*/}"
+  if ! pin_ok "$dir"; then
+    LIMITED=$((LIMITED + 1)); [ "$LIMITED" -ge "$N" ] && break
+    i=$(( (i + 1) % N )); continue
+  fi
   # Tooling parity: MCP servers, plugins, and skills registered on the account
   # we're leaving must exist on the one we're entering, or the resumed session
   # comes back without its tools.
-  if [ -n "$LAST_DIR" ] && [ -x "${SHARED_DIR}/cc-pool-sync" ]; then
+  if [ -n "$LAST_DIR" ] && [ "$LAST_DIR" != "$dir" ] && [ -x "${SHARED_DIR}/cc-pool-sync" ]; then
     "${SHARED_DIR}/cc-pool-sync" "$LAST_DIR" "$dir" || warn "tooling sync failed — continuing anyway"
   fi
   export CLAUDE_CONFIG_DIR="$dir"
@@ -91,12 +123,13 @@ for dir in "${DIRS[@]}"; do
   fi
   [ "$#" -gt 0 ] && args+=("$@")
   if [ -n "$SESSION_ID" ]; then
-    # Auto-submit a turn on rotation resumes. A bare `--resume` only renders the
+    # Auto-submit a turn on rate-limit resumes (not manual ones: those are
+    # usually taken between turns, and an injected turn would start work). A bare `--resume` only renders the
     # old transcript — whose tail is the previous account's rate-limit failure —
     # and then waits for input, so the fresh account looks stalled on "limit
     # reached" until the user types something. Sending a prompt starts the first
     # turn on the new account immediately.
-    args+=("[cc-rotate] The previous account hit its rate limit mid-turn; you have been switched to a fresh account. Continue exactly where you left off.")
+    [ "$MANUAL" -eq 1 ] || args+=("[cc-rotate] The previous account hit its rate limit mid-turn; you have been switched to a fresh account. Continue exactly where you left off.")
     # Restore Remote Control if the dying session had it on. MUST come after the
     # positional prompt: --remote-control takes an optional [name], so placed
     # earlier it would swallow the prompt as its name.
@@ -124,9 +157,32 @@ for dir in "${DIRS[@]}"; do
     exit "$STATUS"
   fi
 
-  # Rate limit hit. Recover the newest transcript so the next account resumes
-  # it (resume can mint a new session UUID, so always re-read the newest file).
-  fail "${label} hit its rate limit"
+  # Rotation requested. Pick the next account: a manual rotation goes to the
+  # named member (or the next one, wrapping); a rate limit goes to the next one
+  # and stops once every account has been limited in a row.
+  reason="$(cat "$ROTATE_FLAG" 2>/dev/null || true)"
+  next=$(( (i + 1) % N ))
+  case "$reason" in
+    manual:*)
+      MANUAL=1; LIMITED=0
+      target="${reason#manual:}"
+      if [ -n "$target" ]; then
+        found=""
+        for j in "${!DIRS[@]}"; do [ "${DIRS[$j]##*/}" = "$target" ] && found="$j"; done
+        if [ -n "$found" ]; then next="$found"
+        else warn "'$target' is not in pool '$CLIENT' — rotating to the next account instead"; fi
+      fi
+      note "manual rotation off ${label}"
+      ;;
+    *)
+      MANUAL=0; LIMITED=$((LIMITED + 1))
+      fail "${label} hit its rate limit"
+      ;;
+  esac
+  [ "$N" -eq 1 ] && [ "$MANUAL" -eq 1 ] && warn "pool '$CLIENT' has one account — resuming on the same one"
+
+  # Recover the newest transcript so the next account resumes it (resume can
+  # mint a new session UUID, so always re-read the newest file).
   latest="$(ls -t "$PROJECTS"/*/*.jsonl 2>/dev/null | head -n 1 || true)"
   if [ -n "$latest" ]; then
     SESSION_ID="$(basename "$latest" .jsonl)"
@@ -146,9 +202,11 @@ for dir in "${DIRS[@]}"; do
     warn "no transcript found under $PROJECTS — next account starts a fresh session"
     SESSION_ID=""
   fi
+  [ "$LIMITED" -ge "$N" ] && break
+  i="$next"
 done
 
-fail "ALL ACCOUNTS IN POOL '${CLIENT}' ARE RATE-LIMITED — not launching anything."
+fail "NO USABLE ACCOUNT IN POOL '${CLIENT}' (all rate-limited or on the wrong login) — not launching anything."
 warn "Check reset times with /usage, or wait out the 5-hour window."
 if [ -n "$SESSION_ID" ]; then
   warn "Resume this conversation later with:"

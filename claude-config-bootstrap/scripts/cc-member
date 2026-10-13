@@ -53,11 +53,14 @@ auth_email() {  # $1 = config dir: logged-in account email ("" if none)
     | sed -n 's/.*"email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
 }
 
-# 1. Log in if needed.
+PINNED="$(cat "$DIR/.ccb-account" 2>/dev/null || true)"   # set by `claude-session --pin`
+
+# 1. Log in if needed (pre-filled with the pinned account, if any).
 if ! command claude auth status >/dev/null 2>&1; then
   note "this account isn't logged in yet — starting login."
-  [ -n "$PRIMARY" ] && note "Sign in with a ${BOLD}DIFFERENT${RESET} subscription than '$PRIMARY' uses; if the browser picks your usual account, switch accounts on the OAuth page."
-  command claude auth login
+  if [ -n "$PINNED" ]; then note "Sign in as ${BOLD}${PINNED}${RESET} (the account this dir is pinned to)."
+  elif [ -n "$PRIMARY" ]; then note "Sign in with a ${BOLD}DIFFERENT${RESET} subscription than '$PRIMARY' uses; if the browser picks your usual account, switch accounts on the OAuth page."; fi
+  command claude auth login ${PINNED:+--email "$PINNED"}
   if ! command claude auth status >/dev/null 2>&1; then
     fail "still not logged in — run $LABEL again to retry."
     exit 1
@@ -65,7 +68,17 @@ if ! command claude auth status >/dev/null 2>&1; then
   printf "${GREEN}%s:${RESET} logged in.\n" "$LABEL" >&2
 fi
 
-# 2. Same subscription as the primary defeats the pool — say so.
+# 2. Logged into the wrong account for this dir's pin: refuse, don't spend it.
+if [ -n "$PINNED" ]; then
+  me="$(auth_email "$DIR")"
+  if [ -n "$me" ] && [ "$me" != "$PINNED" ]; then
+    fail "logged in as $me, but this dir is pinned to $PINNED — not launching."
+    fail "Fix: claude-session --login ${DIR##*/}"
+    exit 1
+  fi
+fi
+
+# 2b. Same subscription as the primary defeats the pool — say so.
 if [ -n "$PRIMARY" ] && [ -d "$PRIMARY_DIR" ]; then
   me="$(auth_email "$DIR")"; them="$(auth_email "$PRIMARY_DIR")"
   if [ -n "$me" ] && [ "$me" = "$them" ]; then

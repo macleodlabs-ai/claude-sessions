@@ -14,6 +14,10 @@
 #   claude-session --pool-list macleod        # show a client's rotation pool
 #   claude-session --pool-remove macleod-2    # remove a rotation account
 #   claude-session --login macleod-2          # (re)log in an account by name
+#   claude-session --usage macleod            # 5h/7d usage of every account in the pool
+#   claude-session --pin macleod-2 me@work.com   # macleod-2 must stay logged in as me@work.com
+#   claude-session --rotate macleod [macleod-2]  # switch a running pool session's account now
+#   /rotate [macleod-2]                       # same, typed inside the pooled session
 #   cc-macleod-2                              # run pool account #2 directly (logs in first if needed)
 #   claude-session --revert                   # remove all tooling (keep accounts)
 #   claude-session --revert --force           # also delete every client account dir
@@ -32,6 +36,22 @@
 #                        it logs the account in if needed, then starts a
 #                        non-rotating session on that account.
 #   --pool-list CLIENT   Show CLIENT's pool members, order, and login state.
+#   --usage CLIENT       Show each pool account's login, last-seen 5h/7d usage and
+#                        reset times (recorded by the statusline of that account's
+#                        sessions), and flag members logged into the same account.
+#   --pin NAME EMAIL     Pin the account NAME (client or pool member) must be logged
+#                        into. Logins pre-fill it and are verified against it; once
+#                        the dir is on that account its logins are locked to the
+#                        account's org (forceLoginOrgUUID in its settings.json);
+#                        cc-rotate skips and cc-<client>-N refuses a dir logged
+#                        into anything else; the footer flags it. --pin NAME --clear
+#                        removes it. (A /login inside a rotated session saves to the
+#                        account active at that moment — this is what catches it.)
+#   --rotate CLIENT [MEMBER]
+#                        Manually rotate CLIENT's running cc-<client> session to
+#                        MEMBER (default: the next account, wrapping around),
+#                        resuming the same conversation. Inside the session, use
+#                        /rotate [MEMBER] instead.
 #   --pool-remove NAME   Remove pool member NAME (e.g. macleod-2) and delete its dir.
 #                        Removing the last member disbands the pool (single-account
 #                        behavior and private history are restored).
@@ -86,8 +106,8 @@ if [ -z "$RC_FILE" ]; then
 fi
 
 # --- arg parsing -----------------------------------------------------------
-MODE=""; FORCE=0; ASSUME_YES=0; declare -a NAMES=()
-print_help() { sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; }
+MODE=""; FORCE=0; ASSUME_YES=0; PIN_EMAIL=""; declare -a NAMES=()
+print_help() { awk 'NR>1 && /^set -euo/{exit} NR>1' "$0" | sed 's/^# \{0,1\}//'; }
 sanitize() { printf '%s' "$1" | tr -cd '[:alnum:]_-'; }
 
 while [ $# -gt 0 ]; do
@@ -99,6 +119,10 @@ while [ $# -gt 0 ]; do
     --pool-list)   MODE="pool-list"; shift ;;
     --pool-remove) MODE="pool-remove"; shift ;;
     --login)       MODE="login"; shift ;;
+    --usage)       MODE="usage"; shift ;;
+    --rotate)      MODE="rotate"; shift ;;
+    --pin)         MODE="pin"; shift
+                   [ $# -ge 2 ] && { NAMES+=("$(sanitize "$1")"); PIN_EMAIL="$2"; shift 2; } ;;
     --revert) MODE="revert"; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     --force)  FORCE=1; ASSUME_YES=1; shift ;;
@@ -212,6 +236,7 @@ rebuild_launchers() {
     ok "Launchers refreshed:${names}"
     # Member launchers call cc-member; make sure an upgraded install has it.
     if [ "${#CC_MEMBERS[@]}" -gt 0 ] && [ ! -x "$SHARED_DIR/cc-member" ]; then install_rotate; fi
+    install_rotate_cmds
   fi
 }
 
@@ -256,13 +281,34 @@ install_rotate() {  # copy the supervisor, hook helpers, and member launcher nex
   done
   [ -n "$src_dir" ] || die "cc-rotate scripts not found (run from the repo, or reinstall)"
   mkdir -p "$SHARED_DIR"
-  for f in cc-rotate cc-rotate-kill cc-pool-sync cc-member; do
+  for f in cc-rotate cc-rotate-kill cc-rotate-now cc-pool-sync cc-member; do
     if [ -f "$SHARED_DIR/$f" ] && cmp -s "$src_dir/$f" "$SHARED_DIR/$f"; then
       ok "$f already installed → $SHARED_DIR/$f"
     else
       cp "$src_dir/$f" "$SHARED_DIR/$f"; chmod +x "$SHARED_DIR/$f"
       add "Installed $f → $SHARED_DIR/$f"
     fi
+  done
+}
+
+install_rotate_cmds() {  # give every pooled primary a /rotate slash command (commands/ is shared across the pool)
+  local pf client f tmp
+  for pf in "$POOLS_DIR"/*.pool; do
+    [ -f "$pf" ] || continue
+    client="$(basename "$pf" .pool)"
+    [ -d "$CLIENTS_PARENT/$client" ] || continue
+    f="$CLIENTS_PARENT/$client/commands/rotate.md"; tmp="$(mktemp)"
+    cat > "$tmp" <<EOF
+---
+description: Switch this pooled session to another account now, resuming the conversation (optional arg — the account, e.g. $client-2)
+argument-hint: [account]
+allowed-tools: Bash($SHARED_DIR/cc-rotate-now:*)
+disable-model-invocation: true
+---
+!\`$SHARED_DIR/cc-rotate-now \$ARGUMENTS\`
+EOF
+    if cmp -s "$tmp" "$f"; then rm -f "$tmp"
+    else mkdir -p "$(dirname "$f")"; mv "$tmp" "$f"; add "Installed /rotate for pool '$client'"; fi
   done
 }
 
@@ -439,16 +485,56 @@ can_login_here() {  # interactive login possible? (claude on PATH + a real tty)
   return 0
 }
 
+# Account pins: <dir>/.ccb-account holds the email a dir must be logged into.
+# A /login typed inside a rotated session saves to the account that is active
+# at that moment, so without a pin one dir can silently drift onto another's
+# subscription. cc-rotate skips, cc-member refuses, the footer flags a mismatch.
+PIN_FILE=".ccb-account"
+pinned_email() { cat "$1/$PIN_FILE" 2>/dev/null || true; }
+account_email() {  # $1 = config dir: the logged-in email per .claude.json ("" if unknown)
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -r '.oauthAccount.emailAddress // ""' "$1/.claude.json" 2>/dev/null || true
+}
+pin_mismatch() {  # $1 = config dir: 0 if pinned AND logged into a different account
+  local p a; p="$(pinned_email "$1")"; a="$(account_email "$1")"
+  [ -n "$p" ] && [ -n "$a" ] && [ "$p" != "$a" ]
+}
+
+org_lock() {  # $1 = config dir: once it is on its pinned account, lock its logins to that org
+  # forceLoginOrgUUID makes claude itself reject a login into any other org, so
+  # a /login typed inside a rotated session can no longer switch this dir onto
+  # another subscription. Per-dir on purpose: cc-pool-sync never copies it.
+  local dir="$1" org cur tmp
+  command -v jq >/dev/null 2>&1 || return 0
+  [ -n "$(pinned_email "$dir")" ] && ! pin_mismatch "$dir" || return 0
+  org="$(jq -r '.oauthAccount.organizationUuid // ""' "$dir/.claude.json" 2>/dev/null)"
+  [ -n "$org" ] || return 0
+  cur="$(jq -r '.forceLoginOrgUUID // "" | if type=="array" then join(",") else . end' "$dir/settings.json" 2>/dev/null)"
+  [ "$cur" = "$org" ] && return 0
+  tmp="$(mktemp)"
+  if { [ -f "$dir/settings.json" ] && jq --arg o "$org" '.forceLoginOrgUUID = $o' "$dir/settings.json" || jq -n --arg o "$org" '{forceLoginOrgUUID: $o}'; } > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    [ -f "$dir/settings.json" ] && cp "$dir/settings.json" "$dir/settings.json.ccbak"
+    cat "$tmp" > "$dir/settings.json"; add "Locked ${dir##*/} logins to its org ($org) via forceLoginOrgUUID"
+  else warn "could not set forceLoginOrgUUID in ${dir##*/}/settings.json"; fi
+  rm -f "$tmp"
+}
+
 login_dir() {  # $1 = config dir: run claude's own login flow there
-  local dir="$1" label="${1##*/}"
-  if [ -f "$dir/$POOL_MARKER" ]; then
+  local dir="$1" label="${1##*/}" pin; pin="$(pinned_email "$1")"
+  if [ -n "$pin" ]; then
+    info "Sign '$label' in as $pin (its pinned account; the login page is pre-filled)."
+    info "If the browser picks another Google account, switch accounts on the OAuth page."
+  elif [ -f "$dir/$POOL_MARKER" ]; then
     info "Sign '$label' into a DIFFERENT subscription than '$(cat "$dir/$POOL_MARKER")' already uses."
     info "If the browser auto-picks your usual account, switch accounts on the OAuth page."
   fi
   if can_login_here; then
     info "Starting login for $label — sign in in the browser; you'll come straight back here."
-    CLAUDE_CONFIG_DIR="$dir" command claude auth login || true
-    if logged_in "$dir"; then ok "$label is logged in"
+    CLAUDE_CONFIG_DIR="$dir" command claude auth login ${pin:+--email "$pin"} || true
+    if pin_mismatch "$dir"; then
+      err "$label logged in as $(account_email "$dir") — NOT its pinned account $pin."
+      err "Rotation will skip it until fixed. Retry: claude-session --login $label"
+    elif logged_in "$dir"; then ok "$label is logged in${pin:+ as $pin}"; org_lock "$dir"
     else warn "$label still has no credentials — retry with: claude-session --login $label"; fi
   else
     warn "Can't launch claude interactively here (needs claude on PATH and a terminal)."
@@ -647,9 +733,9 @@ cmd_login() {
       while IFS= read -r d; do
         case "$d" in ''|\#*) continue ;; esac
         [ -d "$d" ] || continue
-        logged_in "$d" || { targets+=("$d"); queued=1; }
+        if ! logged_in "$d" || pin_mismatch "$d"; then targets+=("$d"); queued=1; fi
       done < "$pf"
-      [ "$queued" -eq 0 ] && ok "All accounts in '$n's pool are already logged in"
+      [ "$queued" -eq 0 ] && ok "All accounts in '$n's pool are logged in (and on their pinned accounts)"
     elif [ -d "$dir" ]; then
       targets+=("$dir")
     else
@@ -677,6 +763,67 @@ cmd_pool_list() {
   else
     info "no pool — cc-$client is single-account. Create one with: claude-session --pool-add $client"
   fi
+}
+
+cmd_usage() {
+  [ "${#NAMES[@]}" -eq 1 ] || die "Usage: claude-session --usage <client>"
+  local client="${NAMES[0]}" pf dir label who uuid at f fr sv svr now age seen="" dup
+  pf="$(pool_file "$client")"
+  [ -f "$pf" ] || die "no pool for '$client' — usage is shown in the cc-$client footer"
+  now="$(date +%s)"
+  hdr "Usage for pool '$client'  ${DIM}(last reading from each account's own sessions)${RESET}"
+  while IFS= read -r dir; do
+    case "$dir" in ''|\#*) continue ;; esac
+    label="$(basename "$dir")"; who="?"; uuid=""
+    if command -v jq >/dev/null 2>&1 && [ -f "$dir/.claude.json" ]; then
+      who="$(jq -r '.oauthAccount.emailAddress // "not logged in"' "$dir/.claude.json" 2>/dev/null)"
+      uuid="$(jq -r '.oauthAccount.accountUuid // ""' "$dir/.claude.json" 2>/dev/null)"
+    fi
+    dup=""
+    if [ -n "$uuid" ]; then
+      case "$seen" in *"|$uuid="*) dup="${seen#*|$uuid=}"; dup="${dup%%|*}" ;; esac
+      seen="${seen}|$uuid=$label|"
+    fi
+    printf "  ${GREEN}●${RESET} %-14s %-34s" "$label" "$who"
+    if IFS=$'\t' read -r at f fr sv svr 2>/dev/null < "$SHARED_DIR/usage/$label.tsv"; then
+      [ "${fr:-0}" -gt 0 ] && [ "$fr" -le "$now" ] && f=0
+      [ "${svr:-0}" -gt 0 ] && [ "$svr" -le "$now" ] && sv=0
+      age=$(( (now - at) / 60 ))
+      printf " 5h %3s%%" "$f"; [ "${fr:-0}" -gt "$now" ] && printf " ${DIM}→%s${RESET}" "$(date -r "$fr" +%H:%M)"
+      printf "  7d %3s%%" "$sv"; [ "${svr:-0}" -gt "$now" ] && printf " ${DIM}→%s${RESET}" "$(date -r "$svr" '+%a %H:%M')"
+      printf "  ${DIM}(%sm ago)${RESET}" "$age"
+    else
+      printf " ${DIM}no reading yet — start a session on it (cc-%s)${RESET}" "$label"
+    fi
+    printf '\n'
+    pin_mismatch "$dir" && err "    $label is pinned to $(pinned_email "$dir") but logged in as $who — rotation skips it. Fix: claude-session --login $label"
+    [ -n "$dup" ] && warn "    $label is logged into the SAME account as $dup — rotating between them gains nothing. Fix: claude-session --login $label"
+  done < "$pf"
+}
+
+cmd_pin() {
+  [ "${#NAMES[@]}" -eq 1 ] && [ -n "$PIN_EMAIL" ] || die "Usage: claude-session --pin <client-or-member> <email>   (or --pin <name> --clear)"
+  local dir="$CLIENTS_PARENT/${NAMES[0]}"
+  [ -d "$dir" ] || die "no client or pool member '${NAMES[0]}' at $dir"
+  if [ "$PIN_EMAIL" = "--clear" ]; then
+    rm -f "$dir/$PIN_FILE"; ok "Unpinned ${NAMES[0]}"
+    if command -v jq >/dev/null 2>&1 && jq -e 'has("forceLoginOrgUUID")' "$dir/settings.json" >/dev/null 2>&1; then
+      local tmp; tmp="$(mktemp)"; jq 'del(.forceLoginOrgUUID)' "$dir/settings.json" > "$tmp" && cat "$tmp" > "$dir/settings.json"; rm -f "$tmp"
+      ok "Removed its forceLoginOrgUUID login lock"
+    fi
+    return
+  fi
+  printf '%s\n' "$PIN_EMAIL" > "$dir/$PIN_FILE"
+  ok "Pinned ${NAMES[0]} → $PIN_EMAIL"
+  if pin_mismatch "$dir"; then warn "It is currently logged in as $(account_email "$dir"). Fix: claude-session --login ${NAMES[0]}"
+  else org_lock "$dir"; fi
+}
+
+cmd_rotate() {
+  [ "${#NAMES[@]}" -ge 1 ] && [ "${#NAMES[@]}" -le 2 ] || die "Usage: claude-session --rotate <client> [member]"
+  [ -f "$(pool_file "${NAMES[0]}")" ] || die "no pool for '${NAMES[0]}'"
+  [ -x "$SHARED_DIR/cc-rotate-now" ] || install_rotate
+  "$SHARED_DIR/cc-rotate-now" --client "${NAMES[0]}" ${NAMES[1]+"${NAMES[1]}"}
 }
 
 cmd_pool_remove() {
@@ -792,5 +939,8 @@ case "$MODE" in
   pool-list)   cmd_pool_list ;;
   pool-remove) cmd_pool_remove ;;
   login)       cmd_login ;;
+  usage)       cmd_usage ;;
+  rotate)      cmd_rotate ;;
+  pin)         cmd_pin ;;
   revert) cmd_revert ;;
 esac

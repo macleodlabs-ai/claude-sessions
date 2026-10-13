@@ -193,9 +193,30 @@ The switch is seamless by design:
 claude-session --pool-add macleod      # add another account (macleod-3, ...)
 claude-session --pool-list macleod     # members, rotation order, login state
 claude-session --login macleod-2       # (re)log in an account by name
+claude-session --usage macleod         # each account's 5h/7d usage + reset times; flags shared logins
+claude-session --pin macleod-2 me@work.com  # macleod-2 must stay on that login (see below)
+claude-session --rotate macleod        # switch the running cc-macleod session to the next account now
+/rotate [macleod-2]                    # same, typed inside the session
 cc-macleod-2                           # run account #2 directly (no rotation)
 claude-session --pool-remove macleod-2 # remove an account (prompts first)
 ```
+
+The pool wraps around: rotation stops only once every account has hit its
+limit in a row. A manual rotation resumes without injecting a turn. In a pooled
+session the footer also shows the other accounts' last-seen usage
+(`↻ macleod-2 5h 8% 7d 3%`), with `⚠ same acct` when two dirs share one login.
+
+**Pin each account.** `/login` typed inside a `cc-macleod` session that has
+rotated saves to the account active *at that moment* (say macleod-2), and the
+browser usually signs in with your default Google account, so macleod-2
+quietly ends up on macleod's subscription. Pin every dir with `--pin`: logins
+pre-fill and verify the pinned email, `cc-rotate` skips a dir on the wrong
+login, `cc-macleod-2` refuses to start, and the footer shows a red
+`⚠ logged in as …` the moment it happens. Once a dir is on its pinned account,
+`--pin`/`--login` also set `forceLoginOrgUUID` in that dir's `settings.json`, so
+Claude Code itself should reject a login into any other org (it applies at
+sign-in; an existing login is not revoked). `claude-session --login macleod`
+re-logs every member that has no credentials or is on the wrong account.
 
 Removing the last member disbands the pool: `cc-macleod` goes back to
 single-account and its session history moves back into its own dir.

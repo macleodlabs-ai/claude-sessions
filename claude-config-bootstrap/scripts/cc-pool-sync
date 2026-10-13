@@ -24,9 +24,11 @@
 #
 # Additive only: nothing the target already has is deleted; the source wins
 # on key conflicts. Caches and credentials are never touched, and of
-# settings.json only the `enabledPlugins` key is merged (an installed plugin
-# is inert until it is enabled there, so copying the installed list alone
-# delivered every plugin switched off) —
+# settings.json only `enabledPlugins` (an installed plugin is inert until it
+# is enabled there, so copying the installed list alone delivered every plugin
+# switched off) and `env` are merged. `env` is add-only — the target keeps its
+# own values — so plugin wiring like CLAUDE_MEM_DATA_DIR follows a rotation
+# (without it, a rotated session wrote claude-mem to a different database) —
 # OAuth-backed MCP servers (e.g. Linear) still need a one-time /mcp
 # authenticate under each account.
 
@@ -126,10 +128,11 @@ if [ -f "$FROM/settings.json" ] && [ ! -L "$TO/settings.json" ] && command -v jq
     [ -f "$TO/settings.json" ] || printf '{}\n' > "$TO/settings.json"
     tmp="$(mktemp)"
     if jq --slurpfile src "$FROM/settings.json" \
-          '.enabledPlugins = ((.enabledPlugins // {}) * $src[0].enabledPlugins)' \
+          '.enabledPlugins = ((.enabledPlugins // {}) * ($src[0].enabledPlugins // {}))
+           | .env = (($src[0].env // {}) * (.env // {}))' \
           "$TO/settings.json" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
       cat "$tmp" > "$TO/settings.json"; rm -f "$tmp"
-      note "plugin enablement synced (settings.json enabledPlugins only)"
+      note "plugin enablement + env synced (settings.json enabledPlugins, env)"
     else rm -f "$tmp"; warn "could not merge enabledPlugins — left target settings.json as-is"; fi
   fi
 fi
