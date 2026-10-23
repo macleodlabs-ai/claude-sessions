@@ -5,7 +5,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-7c5cff.svg?style=flat-square)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-22d3ee.svg?style=flat-square)
 ![Shell](https://img.shields.io/badge/shell-bash-34d399.svg?style=flat-square)
-![Claude Code skill](https://img.shields.io/badge/Claude%20Code-skill-a78bfa.svg?style=flat-square)
+![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin%20%2B%20skill-a78bfa.svg?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-bash%20tests%2Frun.sh-34d399.svg?style=flat-square)
 ![Idempotent](https://img.shields.io/badge/setup-idempotent-febc2e.svg?style=flat-square)
 
 </div>
@@ -31,9 +32,10 @@ cd claude-sessions
 source ~/.zshrc   # one time only — see note below
 ```
 
-That's it. `--create` copies the skill into `~/.claude/skills/`, installs a
-global `claude-session` command, and for each client creates its config dir,
-memory, statusline, and a `cc-<client>` launcher. The first launch logs that
+That's it. `--create` installs a global `claude-session` command, and for each
+client creates its config dir, memory, statusline and a `cc-<client>` launcher,
+and installs the `sessions` plugin (which carries the skill and keeps
+everything updated, see [The plugin](#the-plugin)). The first launch logs that
 account in:
 
 ```bash
@@ -311,6 +313,12 @@ The statusline labels every session and carries live usage:
 - 🧠 context-window used · ⏳ 5-hour and 7-day rate-limit windows — green
   <50%, yellow 50–79%, red ≥80%; the 5h segment shows its reset time once
   it's hot (your early warning before a rotation)
+- `↻ <member> 5h … 7d …` — each other pool member's last-seen usage, so you can
+  see where a rotation would land; `·12m` is the reading's age, `⚠ same acct`
+  means two pool dirs are logged into one subscription (rotating gains nothing)
+- red `⚠ logged in as X — <dir> is pinned to Y` — the dir's login drifted off
+  its pinned account (see [Each account sticks to its first login](#daily-use));
+  in a rotated session it switches to the member that owns X
 - session cost and lines added/removed, dimmed
 - Usage comes straight from Claude Code's statusline feed (2.1.x+); on older
   versions those segments simply don't render.
@@ -341,6 +349,10 @@ If the footer is blank or wrong, quit and relaunch with `cc-<client>`.
 | Pool member shows `NO CREDENTIALS` | Run its launcher (`cc-<member>`, e.g. `cc-macleod-2`) — it logs in first |
 | Resumed session lost MCP servers / plugins after a switch | The pool predates tooling sharing — run `~/.claude-shared/cc-pool-sync <primary-dir> <member-dir>` once per member (pools created by the current `--pool-add` get sharing automatically) |
 | An OAuth MCP server (e.g. Linear) shows disconnected on one account | Expected — logins are per account. Open `/mcp` there and authenticate once |
+| `Credit balance is too low` / footer shows `🔑 API` on a subscription account | An `ANTHROPIC_API_KEY` from your shell or a project `.env` was approved. Launch with `cc-<client>` (it drops the key for subscription dirs), not `command claude` |
+| Footer shows a red `⚠ logged in as …` | Someone ran `/login` with the wrong account. `/login` again with the pinned one, or `claude-session --pin <dir> <email>` if the pin itself is wrong |
+| `sessions` missing from `/plugin` | `claude-session --update` installs it in every client and pool member |
+| A running session still has the old plugin | `/reload-plugins` in that session, or restart it |
 
 ---
 
@@ -350,9 +362,14 @@ If the footer is blank or wrong, quit and relaunch with `cc-<client>`.
 launchers, the bare-`claude` guard, and the global, auto-sourcing
 `claude-session` command — and delegates per-client memory + statusline config
 to the skill's `setup.sh`. The skill ships as plain files under
-`claude-config-bootstrap/` (`SKILL.md`, `README.md`, `scripts/setup.sh`);
-`--create` copies that folder into `~/.claude/skills/` so Claude Code can also
-trigger it by name. `setup.sh` is idempotent and self-contained. For the full
+`claude-config-bootstrap/` (`SKILL.md`, `README.md`, `scripts/`), delivered to
+every client by the `sessions` plugin (or copied into `<config-dir>/skills/`
+where the plugin is off) so Claude Code can also trigger it by name. `setup.sh`
+is idempotent and self-contained. Rotation and account safety live in the
+helpers `--create` installs into `~/.claude-shared/` (`cc-rotate`,
+`cc-rotate-kill`, `cc-rotate-now`, `cc-member`, `cc-account-guard`,
+`cc-pool-sync`). `bash tests/run.sh` runs the sandboxed regression tests; each
+names the incident it guards. For the full
 design, flags, and mechanics, read
 [`claude-config-bootstrap/README.md`](claude-config-bootstrap/README.md).
 
