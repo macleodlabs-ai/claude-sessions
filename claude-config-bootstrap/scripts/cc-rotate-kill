@@ -11,7 +11,7 @@
 # and a live pid file), this is a silent no-op — so the hook is harmless in
 # pool dirs launched directly (e.g. for /login) and in plain cc-<client> use.
 
-cat > /dev/null 2>&1 || true   # drain the hook's stdin payload
+payload="$(cat 2>/dev/null || true)"   # drain the hook's stdin payload
 
 [ "${CC_ROTATE_ACTIVE:-0}" = "1" ] || exit 0
 [ -n "${CC_ROTATE_PIDFILE:-}" ] || exit 0
@@ -19,6 +19,27 @@ cat > /dev/null 2>&1 || true   # drain the hook's stdin payload
 
 pid="$(cat "$CC_ROTATE_PIDFILE" 2>/dev/null || true)"
 case "$pid" in ''|*[!0-9]*) exit 0 ;; esac
+
+# The CC_ROTATE_* vars are inherited by everything the supervised claude
+# spawns — Bash tools, plugin workers, a nested `claude -p`, a cc-<other>
+# started from its terminal. Their StopFailure hooks land here too, and a rate
+# limit on THEIR account must not kill this session (2026-10-23: a `claude -p`
+# on tl's weekly-limited account rotated a macleod session). Act only when the
+# nearest claude above this hook is the supervised one; if ps can't tell us,
+# keep the old behaviour.
+p="$PPID"; owner=""
+for _ in 1 2 3 4 5 6 7 8; do
+  case "$p" in ''|0|1|*[!0-9]*) break ;; esac
+  comm="$(ps -o comm= -p "$p" 2>/dev/null)" || break
+  case "${comm##*/}" in claude) owner="$p"; break ;; esac
+  p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+done
+[ -z "$owner" ] || [ "$owner" = "$pid" ] || exit 0
+
+# Tell the supervisor which conversation failed, so it resumes this one and not
+# whichever transcript in the shared pool history happens to be newest.
+sid="$(printf '%s' "$payload" | grep -o '"session_id" *: *"[^"]*"' | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/')"
+[ -n "$sid" ] && printf '%s\n' "$sid" > "${CC_ROTATE_PIDFILE}.session"
 
 touch "${CC_ROTATE_PIDFILE}.rotate"
 kill -TERM "$pid" 2>/dev/null || true

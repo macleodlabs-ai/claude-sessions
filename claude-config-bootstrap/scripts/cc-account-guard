@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+#
+# cc-account-guard — keep every config dir on the account it was first logged into.
+#
+# A /login typed inside a session saves to whichever dir is active, so without
+# a guard one dir can silently move onto another account's subscription (how
+# macleod-2 drifted onto macleod, 2026-10-09). This makes the first login stick:
+#
+#   - Logged in, no pin yet: pin the dir to that email (<dir>/.ccb-account),
+#     unless another dir in its pool already holds that account (pinned, or
+#     logged in and earlier in pool order).
+#   - On its pinned account: lock logins to that account's org
+#     (forceLoginOrgUUID), so claude itself rejects a /login into another one.
+#   - On a different account: exit 1. With --session inside a cc-rotate
+#     session, if that account is another pool member's, rotate there — the
+#     conversation moves to the dir that owns the account.
+#
+# Usage: cc-account-guard [--session] DIR
+#   (called by cc-rotate, cc-member, the cc-<client> launchers and the statusline)
+#
+# jq-optional like every other pin check: without jq this is a no-op.
+
+set -uo pipefail
+command -v jq >/dev/null 2>&1 || exit 0
+
+SESSION=0
+[ "${1:-}" = "--session" ] && { SESSION=1; shift; }
+DIR="${1:-}"
+[ -d "$DIR" ] || exit 0
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SHARED_DIR="${SHARED_DIR:-$SCRIPT_DIR}"
+label="${DIR##*/}"
+
+say() { [ "$SESSION" -eq 1 ] || printf 'cc-account-guard: %s\n' "$1" >&2; }
+email_of() { jq -r '.oauthAccount.emailAddress // ""' "$1/.claude.json" 2>/dev/null || true; }
+pin_of() { cat "$1/.ccb-account" 2>/dev/null || true; }
+
+client="$label"
+[ -f "$DIR/.ccb-pool-member" ] && client="$(cat "$DIR/.ccb-pool-member" 2>/dev/null)"
+POOL="$SHARED_DIR/pools/$client.pool"
+pool_dirs() { [ -f "$POOL" ] && grep -vE '^[[:space:]]*(#|$)' "$POOL"; return 0; }
+siblings() { pool_dirs | grep -vxF "$DIR"; return 0; }
+
+me="$(email_of "$DIR")"
+[ -n "$me" ] || exit 0   # not logged in (or an API-key dir): nothing to guard
+
+pin="$(pin_of "$DIR")"
+if [ -z "$pin" ]; then
+  # The account belongs to whichever dir pinned it, else to the earliest dir in
+  # pool order logged into it (the primary first) — never to two dirs.
+  before=1
+  while IFS= read -r s; do
+    [ "$s" = "$DIR" ] && { before=0; continue; }
+    sp="$(pin_of "$s")"
+    if [ "$sp" = "$me" ] || { [ "$before" -eq 1 ] && [ -z "$sp" ] && [ "$(email_of "$s")" = "$me" ]; }; then
+      say "$label is logged in as $me, which ${s##*/} already uses — not pinning it."
+      say "Fix: claude-session --login $label   (sign in with its own account)"
+      exit 0
+    fi
+  done < <(pool_dirs)
+  printf '%s\n' "$me" > "$DIR/.ccb-account"
+  pin="$me"
+  say "pinned $label to $me (its first login sticks)"
+fi
+
+if [ "$me" != "$pin" ]; then
+  owner=""
+  while IFS= read -r s; do [ "$(pin_of "$s")" = "$me" ] && owner="${s##*/}"; done < <(siblings)
+  # Inside a rotated session: move the conversation to the dir that owns this
+  # account. Once per launch (cc-rotate clears the marker on every relaunch).
+  if [ "$SESSION" -eq 1 ] && [ -n "$owner" ] && [ "${CC_ROTATE_ACTIVE:-0}" = "1" ] \
+      && [ -n "${CC_ROTATE_PIDFILE:-}" ] && [ -f "$CC_ROTATE_PIDFILE" ] && [ ! -e "$CC_ROTATE_PIDFILE.drift" ]; then
+    : > "$CC_ROTATE_PIDFILE.drift"
+    "$SHARED_DIR/cc-rotate-now" "$owner" >/dev/null 2>&1 || true
+  fi
+  # (no apostrophe inside ${owner:+...}: bash treats it as a quote there)
+  say "$label is pinned to $pin but logged in as $me${owner:+, the account of $owner}."
+  say "Fix: claude-session --login $label"
+  exit 1
+fi
+
+# On its own account: lock its logins to this account's org. Per-dir on
+# purpose — cc-pool-sync never copies forceLoginOrgUUID between members.
+org="$(jq -r '.oauthAccount.organizationUuid // ""' "$DIR/.claude.json" 2>/dev/null)"
+[ -n "$org" ] || exit 0
+settings="$DIR/settings.json"
+cur="$(jq -r '.forceLoginOrgUUID // "" | if type=="array" then join(",") else . end' "$settings" 2>/dev/null)"
+[ "$cur" = "$org" ] && exit 0
+tmp="$(mktemp)"
+if { if [ -f "$settings" ]; then jq --arg o "$org" '.forceLoginOrgUUID = $o' "$settings"
+     else jq -n --arg o "$org" '{forceLoginOrgUUID: $o}'; fi; } > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+  [ -f "$settings" ] && cp "$settings" "$settings.ccbak"
+  cat "$tmp" > "$settings"
+  say "locked $label logins to its account's org ($org)"
+fi
+rm -f "$tmp"
+exit 0

@@ -49,12 +49,26 @@ else
   [ "${CC_ROTATE_ACTIVE:-0}" = "1" ] && [ -n "${CC_ROTATE_PIDFILE:-}" ] \
     || fail "this session wasn't started by a pooled cc-<client> launcher (cc-<client>-N sessions never rotate). From another terminal: cc-rotate-now --client <client>"
   pidfile="$CC_ROTATE_PIDFILE"
+  # The CC_ROTATE_* vars leak into everything the session spawns, including
+  # other claude sessions; only rotate the one we are actually inside.
+  supervised="$(cat "$pidfile" 2>/dev/null || true)"
+  p="$PPID"; owner=""
+  for _ in 1 2 3 4 5 6 7 8; do
+    case "$p" in ''|0|1|*[!0-9]*) break ;; esac
+    comm="$(ps -o comm= -p "$p" 2>/dev/null)" || break
+    case "${comm##*/}" in claude) owner="$p"; break ;; esac
+    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+  done
+  [ -z "$owner" ] || [ "$owner" = "$supervised" ] \
+    || fail "this claude session isn't the pooled one that exported the rotation vars — nothing to rotate."
 fi
 
 [ -f "$pidfile" ] || fail "supervisor pid file is gone ($pidfile) — is the session still running?"
 pid="$(cat "$pidfile" 2>/dev/null || true)"
 case "$pid" in ''|*[!0-9]*) fail "no claude pid in $pidfile" ;; esac
 
+# From inside the session, claude tells us which conversation this is.
+[ -z "$CLIENT" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && printf '%s\n' "$CLAUDE_CODE_SESSION_ID" > "${pidfile}.session"
 printf 'manual:%s\n' "$TARGET" > "${pidfile}.rotate"
 printf 'cc-rotate-now: rotating%s — the session resumes on the new account in a moment.\n' "${TARGET:+ to $TARGET}" >&2
 kill -TERM "$pid" 2>/dev/null || fail "could not signal claude (pid $pid)"

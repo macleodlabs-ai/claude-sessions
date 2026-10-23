@@ -68,14 +68,11 @@ if ! command claude auth status >/dev/null 2>&1; then
   printf "${GREEN}%s:${RESET} logged in.\n" "$LABEL" >&2
 fi
 
-# 2. Logged into the wrong account for this dir's pin: refuse, don't spend it.
-if [ -n "$PINNED" ]; then
-  me="$(auth_email "$DIR")"
-  if [ -n "$me" ] && [ "$me" != "$PINNED" ]; then
-    fail "logged in as $me, but this dir is pinned to $PINNED — not launching."
-    fail "Fix: claude-session --login ${DIR##*/}"
-    exit 1
-  fi
+# 2. Stick to the first account: pin it on first launch, refuse if the dir is
+# now on any other account rather than spend that one.
+if [ -x "$SHARED_DIR/cc-account-guard" ] && ! "$SHARED_DIR/cc-account-guard" "$DIR"; then
+  fail "not launching ${DIR##*/} on the wrong account."
+  exit 1
 fi
 
 # 2b. Same subscription as the primary defeats the pool — say so.
@@ -100,4 +97,7 @@ case " $* " in
   *) args+=(--permission-mode auto) ;;
 esac
 [ "$#" -gt 0 ] && args+=("$@")
+# A subscription login beats an API key in the environment (see _ccb_claude
+# in the launcher block).
+grep -qE '"oauthAccount": *\{' "$DIR/.claude.json" 2>/dev/null && unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
 exec claude "${args[@]}"

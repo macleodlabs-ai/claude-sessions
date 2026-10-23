@@ -297,9 +297,30 @@ pct_paint() {
   else printf '\033[32m%s%%\033[0m' "$1"; fi
 }
 
-printf '%s \033[2m│\033[0m %s \033[2m│\033[0m 📁 %s' "$tag" "$model" "$base"
-# Pinned account (claude-session --pin): flag a dir logged into anything else,
-# e.g. after a /login typed inside a rotated session landed on the wrong account.
+printf '%s' "$tag"
+# Billing mode: an API key in claude's environment wins over the subscription
+# unless this dir rejected it (claude keys its approve/reject list by the key's
+# last 20 chars). The cc- launchers drop the key for subscription dirs.
+key="${ANTHROPIC_API_KEY:-}"
+if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then mode=api
+elif [ -n "$key" ]; then
+  mode=api
+  if command -v jq >/dev/null 2>&1 && jq -e --arg k "${key: -20}" \
+      '(.customApiKeyResponses.rejected // []) | index($k) != null' "$cfg/.claude.json" >/dev/null 2>&1; then
+    mode=sub
+  fi
+elif grep -qE '"oauthAccount": *\{' "$cfg/.claude.json" 2>/dev/null; then mode=sub
+else mode=""; fi
+case "$mode" in
+  sub) printf ' \033[32m💳 sub\033[0m' ;;
+  api) printf ' \033[1;43;30m 🔑 API \033[0m' ;;
+esac
+printf ' \033[2m│\033[0m %s \033[2m│\033[0m 📁 %s' "$model" "$base"
+# Pinned account: the first login sticks (cc-account-guard pins it and locks the
+# org). If a /login inside a rotated session moved this dir onto another pool
+# member's account, the guard rotates the session to that member; either way
+# the banner below flags the mismatch.
+[ -x "$shared/cc-account-guard" ] && "$shared/cc-account-guard" --session "$cfg" >/dev/null 2>&1
 if [ -f "$cfg/.ccb-account" ] && command -v jq >/dev/null 2>&1; then
   pin="$(cat "$cfg/.ccb-account" 2>/dev/null)"
   acct="$(jq -r '.oauthAccount.emailAddress // ""' "$cfg/.claude.json" 2>/dev/null)"

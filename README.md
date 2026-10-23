@@ -206,17 +206,20 @@ limit in a row. A manual rotation resumes without injecting a turn. In a pooled
 session the footer also shows the other accounts' last-seen usage
 (`↻ macleod-2 5h 8% 7d 3%`), with `⚠ same acct` when two dirs share one login.
 
-**Pin each account.** `/login` typed inside a `cc-macleod` session that has
-rotated saves to the account active *at that moment* (say macleod-2), and the
-browser usually signs in with your default Google account, so macleod-2
-quietly ends up on macleod's subscription. Pin every dir with `--pin`: logins
-pre-fill and verify the pinned email, `cc-rotate` skips a dir on the wrong
-login, `cc-macleod-2` refuses to start, and the footer shows a red
-`⚠ logged in as …` the moment it happens. Once a dir is on its pinned account,
-`--pin`/`--login` also set `forceLoginOrgUUID` in that dir's `settings.json`, so
-Claude Code itself should reject a login into any other org (it applies at
-sign-in; an existing login is not revoked). `claude-session --login macleod`
-re-logs every member that has no credentials or is on the wrong account.
+**Each account sticks to its first login.** `/login` typed inside a
+`cc-macleod` session that has rotated saves to the account active *at that
+moment* (say macleod-2), and the browser usually signs in with your default
+Google account, so macleod-2 could quietly end up on macleod's subscription.
+So the first time a launcher or the footer sees a dir logged in, it pins the
+dir to that email (`.ccb-account`) and sets `forceLoginOrgUUID` in the dir's
+`settings.json`, so Claude Code itself rejects a later login into any other
+account. An account another dir in the pool already holds is never pinned
+twice (the earlier dir in pool order keeps it). If a dir still lands on
+another member's account, the running session switches to the member that owns
+it; `cc-rotate` skips the drifted dir, `cc-macleod-2` refuses to start, and the
+footer shows a red `⚠ logged in as …`. `--pin` sets or changes a pin by hand;
+`claude-session --login macleod` re-logs every member that has no credentials
+or is on the wrong account.
 
 Removing the last member disbands the pool: `cc-macleod` goes back to
 single-account and its session history moves back into its own dir.
@@ -263,8 +266,14 @@ Never edit between the `:begin` / `:end` markers — that block is auto-managed.
 The statusline labels every session and carries live usage:
 
 ```
-● macleod │ Fable 5 │ 📁 growthOS │ 🌿 main │ 🧠 10% │ ⏳ 5h 7% · 7d 1% │ $7.25 +445/-2
+● macleod 💳 sub │ Fable 5 │ 📁 growthOS │ 🌿 main │ 🧠 10% │ ⏳ 5h 7% · 7d 1% │ $7.25 +445/-2
 ```
+
+- 💳 sub / 🔑 API — what this session bills: the account's subscription, or an
+  `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` from the environment. The
+  `cc-` launchers drop those variables for any dir logged in with a
+  subscription, so an API key exported by a project's env can't take over
+  (and fail with "Credit balance is too low") once claude has approved it.
 
 - 🧠 context-window used · ⏳ 5-hour and 7-day rate-limit windows — green
   <50%, yellow 50–79%, red ≥80%; the 5h segment shows its reset time once

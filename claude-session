@@ -178,9 +178,28 @@ build_block() {  # prints the rc block for the current CC_DIRS + CC_MEMBERS
   # one it launches claude directly. Either way the session runs in auto
   # permission mode unless the caller passed a mode of their own
   # (`--permission-mode X` or `--dangerously-skip-permissions`).
+  # A dir logged in with a subscription must use it: an ANTHROPIC_API_KEY in the
+  # environment would otherwise win once approved, billing an API account (and
+  # failing "Credit balance is too low" when it's empty). cc-rotate and
+  # cc-member apply the same rule. Each dir also sticks to the account it was
+  # first logged into (cc-account-guard pins it, and refuses a drifted dir).
+  printf '_ccb_guard=%q\n' "$SHARED_DIR/cc-account-guard"
+  cat <<'RUNNER'
+_ccb_claude() {
+  local d="$1"; shift
+  if [ -x "$_ccb_guard" ] && ! "$_ccb_guard" "$d"; then
+    printf 'Not launching %s on the wrong account.\n' "${d##*/}" >&2; return 1
+  fi
+  if grep -qE '"oauthAccount": *\{' "$d/.claude.json" 2>/dev/null; then
+    ( unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; CLAUDE_CONFIG_DIR="$d" command claude "$@" )
+  else
+    CLAUDE_CONFIG_DIR="$d" command claude "$@"
+  fi
+}
+RUNNER
   local d
   for d in "${CC_DIRS[@]}"; do
-    printf '%s() { if [ -f %q ]; then %q %q "$@"; else case " $* " in *" --permission-mode"*|*" --dangerously-skip-permissions"*) CLAUDE_CONFIG_DIR=%q command claude "$@" ;; *) CLAUDE_CONFIG_DIR=%q command claude --permission-mode auto "$@" ;; esac; fi; }\n' \
+    printf '%s() { if [ -f %q ]; then %q %q "$@"; else case " $* " in *" --permission-mode"*|*" --dangerously-skip-permissions"*) _ccb_claude %q "$@" ;; *) _ccb_claude %q --permission-mode auto "$@" ;; esac; fi; }\n' \
       "$(fn_label "$d")" "$POOLS_DIR/$(basename "$d").pool" "$SHARED_DIR/cc-rotate" "$(basename "$d")" "$d" "$d"
   done
   # Pool members get a direct, non-rotating launcher named like their footer
@@ -281,11 +300,14 @@ install_rotate() {  # copy the supervisor, hook helpers, and member launcher nex
   done
   [ -n "$src_dir" ] || die "cc-rotate scripts not found (run from the repo, or reinstall)"
   mkdir -p "$SHARED_DIR"
-  for f in cc-rotate cc-rotate-kill cc-rotate-now cc-pool-sync cc-member; do
+  for f in cc-rotate cc-rotate-kill cc-rotate-now cc-pool-sync cc-member cc-account-guard; do
     if [ -f "$SHARED_DIR/$f" ] && cmp -s "$src_dir/$f" "$SHARED_DIR/$f"; then
       ok "$f already installed → $SHARED_DIR/$f"
     else
-      cp "$src_dir/$f" "$SHARED_DIR/$f"; chmod +x "$SHARED_DIR/$f"
+      # Copy then rename: a live cc-rotate supervisor is a bash script read
+      # incrementally, so overwriting it in place would corrupt running pools.
+      cp "$src_dir/$f" "$SHARED_DIR/.$f.new" && chmod +x "$SHARED_DIR/.$f.new" \
+        && mv -f "$SHARED_DIR/.$f.new" "$SHARED_DIR/$f"
       add "Installed $f → $SHARED_DIR/$f"
     fi
   done
@@ -534,7 +556,12 @@ login_dir() {  # $1 = config dir: run claude's own login flow there
     if pin_mismatch "$dir"; then
       err "$label logged in as $(account_email "$dir") — NOT its pinned account $pin."
       err "Rotation will skip it until fixed. Retry: claude-session --login $label"
-    elif logged_in "$dir"; then ok "$label is logged in${pin:+ as $pin}"; org_lock "$dir"
+    elif logged_in "$dir"; then
+      ok "$label is logged in${pin:+ as $pin}"
+      # First login sticks: cc-account-guard pins an unpinned dir to it and locks the org.
+      if [ -z "$pin" ] && [ -x "$SHARED_DIR/cc-account-guard" ]; then
+        SHARED_DIR="$SHARED_DIR" "$SHARED_DIR/cc-account-guard" "$dir" || true
+      else org_lock "$dir"; fi
     else warn "$label still has no credentials — retry with: claude-session --login $label"; fi
   else
     warn "Can't launch claude interactively here (needs claude on PATH and a terminal)."
