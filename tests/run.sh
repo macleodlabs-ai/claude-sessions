@@ -212,7 +212,7 @@ mkdir -p "$T/remote" && (cd "$REPO" && git ls-files -co --exclude-standard | gre
 git clone -q "$T/remote" "$T/dev"
 cs_env() { env -u CLAUDE_CONFIG_DIR SHARED_DIR="$T/shared" CLIENTS_PARENT="$T/c" RC_FILE="$T/rc" SKILLS_DIR="$T/defskills" "$@"; }
 rm -f "$T/shared/cc-"*   # start from a clean install
-cs_env bash "$T/dev/claude-session" -y --create c1 >/dev/null 2>&1
+cs_env CCB_NO_PLUGIN=1 bash "$T/dev/claude-session" -y --create c1 >/dev/null 2>&1
 check "--create records where updates come from" "$(cat "$T/shared/.ccb-source" 2>/dev/null)" "$T/remote"
 # Each account loads skills from its own config dir; the skill used to land only
 # in the dir of the session that ran the installer (2026-10-23).
@@ -221,7 +221,7 @@ check "--create gives the client its own copy of the skill" \
 echo "# marker-v2" >> "$T/remote/claude-config-bootstrap/scripts/cc-member"
 echo "marker-v2" >> "$T/remote/claude-config-bootstrap/README.md"
 (cd "$T/remote" && $G commit -qam v2)
-cs_env "$T/shared/claude-session" --update --auto > "$T/up.log" 2>&1
+cs_env CCB_NO_PLUGIN=1 "$T/shared/claude-session" --update --auto > "$T/up.log" 2>&1
 check "--update installs the new scripts without a pull or --create by hand" \
   "$(tail -n 1 "$T/shared/cc-member")" "# marker-v2"
 check "--update refreshes every client's skill copy" \
@@ -229,7 +229,7 @@ check "--update refreshes every client's skill copy" \
 check "--update leaves the dev checkout alone (it pulls into its own clone)" \
   "$(grep -c marker-v2 "$T/dev/claude-config-bootstrap/scripts/cc-member")" "0"
 check "the launcher block calls the auto-updater" "$(grep -c '_ccb_autoupdate; ' "$T/rc")" "1"
-cs_env "$T/shared/claude-session" --update --auto > "$T/up2.log" 2>&1; rc=$?
+cs_env CCB_NO_PLUGIN=1 "$T/shared/claude-session" --update --auto > "$T/up2.log" 2>&1; rc=$?
 check "--auto with nothing new does nothing" "$rc $(grep -c updated "$T/up2.log")" "0 0"
 mkdir "$T/shared/.update.lock"
 cs_env "$T/shared/claude-session" --update --auto > "$T/up3.log" 2>&1; rc=$?
@@ -248,6 +248,60 @@ awk "/<<'SL'\$/{f=1;next} /^SL\$/{f=0} f" "$SCRIPTS/setup.sh" > "$T/shared/statu
 touch -t 202001010000 "$T/shared/.update-stamp"
 printf '{"cwd":"%s"}' "$T" | CLAUDE_CONFIG_DIR="$T/c/c1" bash "$T/shared/statusline.sh" >/dev/null 2>&1; sleep 0.3
 check "a running session's statusline starts the hourly auto-update" "$(cat "$T/auto.log" 2>/dev/null)" "--update --auto"
+
+# ---------------------------------------------------------------------------
+echo "sessions plugin (shows in /plugin, updates there)"
+sandbox plugin
+# Fake `claude plugin`: log the call; `install` enables the plugin the way claude does.
+cat > "$T/bin/claude" <<EOF
+#!/bin/bash
+echo "\${CLAUDE_CONFIG_DIR##*/} \$*" >> "$T/plugin.log"
+if [ "\$1 \$2" = "plugin marketplace" ]; then
+  s="\$CLAUDE_CONFIG_DIR/settings.json"; [ -f "\$s" ] || echo '{}' > "\$s"
+  jq '.extraKnownMarketplaces["claude-sessions"] = {source: {source: "github", repo: "macleodlabs-ai/claude-sessions"}}' "\$s" > "\$s.t" && mv "\$s.t" "\$s"
+fi
+if [ "\$1 \$2" = "plugin install" ]; then
+  s="\$CLAUDE_CONFIG_DIR/settings.json"
+  jq '.enabledPlugins["sessions@claude-sessions"] = true' "\$s" > "\$s.t" && mv "\$s.t" "\$s"
+fi
+exit 0
+EOF
+chmod +x "$T/bin/claude"
+mkdir -p "$T/remote" && (cd "$REPO" && git ls-files -co --exclude-standard | grep -v '^assets/' | while IFS= read -r f; do
+  [ -f "$f" ] && mkdir -p "$T/remote/$(dirname "$f")" && cp -p "$f" "$T/remote/$f"; done)
+(cd "$T/remote" && $G init -q && $G add -A && $G commit -qm base)
+rm -f "$T/shared/cc-"*
+mkdir -p "$T/c/c1-2"; echo c1 > "$T/c/c1-2/.ccb-pool-member"
+mkdir -p "$T/c/c1/skills/claude-config-bootstrap"; printf -- '---\nname: claude-config-bootstrap\n---\n' > "$T/c/c1/skills/claude-config-bootstrap/SKILL.md"
+penv() { env -u CLAUDE_CONFIG_DIR PATH="$T/bin:$PATH" SHARED_DIR="$T/shared" CLIENTS_PARENT="$T/c" RC_FILE="$T/rc" SKILLS_DIR="$T/defskills" "$@"; }
+penv bash "$T/remote/claude-session" -y --create c1 >/dev/null 2>&1
+printf '%s\n' "$T/c/c1" "$T/c/c1-2" > "$T/shared/pools/c1.pool"
+penv CCB_SOURCE_URL="$T/remote" bash "$T/remote/claude-session" --update >/dev/null 2>&1
+# The user's ask (2026-10-23): claude-sessions must show in /plugin for every
+# account, pool members included, so it can be updated from inside a session.
+check "installs the sessions plugin for a client" "$(jq -r '.enabledPlugins["sessions@claude-sessions"]' "$T/c/c1/settings.json")" "true"
+check "installs it for pool members too" "$(jq -r '.enabledPlugins["sessions@claude-sessions"]' "$T/c/c1-2/settings.json" 2>/dev/null)" "true"
+check "turns on auto-update for its marketplace" "$(jq -r '.extraKnownMarketplaces["claude-sessions"].autoUpdate' "$T/c/c1/settings.json")" "true"
+# Both would load: a copied skill beside the plugin's is a duplicate skill.
+check "removes the copied skill once the plugin provides it" "$([ -e "$T/c/c1/skills/claude-config-bootstrap" ] && echo present || echo removed)" "removed"
+: > "$T/plugin.log"; penv CCB_SOURCE_URL="$T/remote" bash "$T/remote/claude-session" --update >/dev/null 2>&1
+check "does not reinstall a plugin that is already enabled" "$(grep -c 'plugin install' "$T/plugin.log")" "0"
+
+# The plugin's SessionStart hook: a /plugin update must reach the shared scripts.
+HOOKS="$REPO/claude-config-bootstrap/scripts/plugin-session-start"
+mkdir -p "$T/proot/claude-config-bootstrap/scripts"; cp "$HOOKS" "$T/proot/claude-config-bootstrap/scripts/"
+cp "$T/fakecli" "$T/proot/claude-session" 2>/dev/null || printf '#!/bin/bash\necho "$*" >> %q\n' "$T/hook.log" > "$T/proot/claude-session"
+printf '#!/bin/bash\necho "$*" >> %q\n' "$T/hook.log" > "$T/proot/claude-session"; chmod +x "$T/proot/claude-session"
+hook() { SHARED_DIR="$T/shared" bash "$T/proot/claude-config-bootstrap/scripts/plugin-session-start"; sleep 0.3; }
+rm -f "$T/hook.log" "$T/shared/.plugin-root"; : > "$T/shared/.update-stamp"
+out="$(hook)"
+check "after a plugin update, the hook updates straight away (throttle bypassed)" "$(cat "$T/hook.log" 2>/dev/null)" "--update --auto"
+check "the hook prints nothing (its stdout would go into Claude's context)" "$out" ""
+rm -f "$T/hook.log"; hook
+check "same plugin version within the hour: the hook does nothing" "$(cat "$T/hook.log" 2>/dev/null)" ""
+mv "$T/shared/claude-session" "$T/shared/cs.off"; rm -f "$T/shared/.plugin-root"; hook
+check "never sets anything up on a machine claude-session isn't installed on" "$(cat "$T/hook.log" 2>/dev/null)" ""
+mv "$T/shared/cs.off" "$T/shared/claude-session"
 
 # ---------------------------------------------------------------------------
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"

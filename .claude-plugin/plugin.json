@@ -1,0 +1,9 @@
+{
+  "name": "sessions",
+  "description": "Per-client Claude Code accounts with shared memory, a client-aware footer, rotation pools and account pins. Keeps claude-session up to date.",
+  "author": { "name": "Macleod Labs", "url": "https://macleodlabs.ai" },
+  "homepage": "https://github.com/macleodlabs-ai/claude-sessions",
+  "repository": "https://github.com/macleodlabs-ai/claude-sessions",
+  "license": "MIT",
+  "skills": ["./claude-config-bootstrap/"]
+}

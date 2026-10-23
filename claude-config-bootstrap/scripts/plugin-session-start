@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#
+# plugin-session-start — SessionStart hook of the `sessions` plugin.
+#
+# Updating the plugin with /plugin only replaces the plugin's own copy; the
+# shared scripts, footer and launchers live in ~/.claude-shared. This starts
+# the same background `claude-session --update --auto` the launchers and the
+# footer use: hourly at most, and straight away after the plugin itself moved
+# to a new version. Silent on purpose — a SessionStart hook's stdout goes into
+# Claude's context.
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+SHARED_DIR="${SHARED_DIR:-$HOME/.claude-shared}"
+[ -z "${CCB_NO_AUTOUPDATE:-}" ] || exit 0
+# Only keep an existing setup current: on a machine claude-session never set
+# up, an update would write a launcher block (and the bare-claude guard) unasked.
+[ -x "$SHARED_DIR/claude-session" ] && [ -x "$ROOT/claude-session" ] || exit 0
+
+last="$(cat "$SHARED_DIR/.plugin-root" 2>/dev/null || true)"
+if [ "$last" = "$ROOT" ] && [ -n "$(find "$SHARED_DIR/.update-stamp" -mmin -60 2>/dev/null)" ]; then
+  exit 0
+fi
+printf '%s\n' "$ROOT" > "$SHARED_DIR/.plugin-root" 2>/dev/null
+: > "$SHARED_DIR/.update-stamp" 2>/dev/null
+( CCB_SOURCE_URL="https://github.com/macleodlabs-ai/claude-sessions.git" \
+    bash "$ROOT/claude-session" --update --auto </dev/null >>"$SHARED_DIR/update.log" 2>&1 & ) 2>/dev/null
+exit 0
