@@ -181,7 +181,11 @@ Shell launchers, deletion, and revert are the `claude-session` CLI's job — see
 
 **The statusline.** Claude Code pipes a JSON blob to a script on every tick and renders whatever it prints as the footer. The shared script reads `CLAUDE_CONFIG_DIR` (inherited from the launching shell) to derive the client label, then adds model, directory, and git branch. Because the label comes from the env var, not the JSON, it works even without `jq`.
 
+After the label it shows how the session bills: `💳 sub` for the account's subscription, or `🔑 API` when an `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is in use. The launchers unset both variables for any dir logged in with a subscription. Without that, a key Claude Code was once told to accept beats the subscription. (tl and tl-2 billed an empty-credit key that way and could not restart.)
+
 **The launchers.** A single sentinel-delimited block in your rc file defines one function per bootstrapped config dir, a neutered `claude`, and the global `claude-session` command. The `claude-session` CLI rebuilds that block from the live set of dirs on every run, so it stays in sync as you add or remove clients.
+
+**Updating.** `claude-session --update` fast-forwards its own clone (`~/.claude-shared/src`) and refreshes the shared scripts, every client and the launchers. It also runs by itself in the background, at most once an hour, from each launcher, from the footer of a running session, and from the `sessions` plugin's SessionStart hook. The repo is a Claude Code plugin (`sessions` in the `claude-sessions` marketplace), so it appears in `/plugin` and updates from there. Where the plugin is enabled it delivers this skill, and the copy in `<config-dir>/skills/` is removed.
 
 ---
 
