@@ -321,6 +321,14 @@ printf ' \033[2m│\033[0m %s \033[2m│\033[0m 📁 %s' "$model" "$base"
 # member's account, the guard rotates the session to that member; either way
 # the banner below flags the mismatch.
 [ -x "$shared/cc-account-guard" ] && "$shared/cc-account-guard" --session "$cfg" >/dev/null 2>&1
+# Auto-update inside running sessions too (hourly, in the background, a no-op
+# unless the repo moved). This script and the hooks are re-read on every use,
+# so an update applies to this session without a restart.
+if [ -z "${CCB_NO_AUTOUPDATE:-}" ] && [ -f "$shared/.ccb-source" ] && [ -x "$shared/claude-session" ] \
+    && [ -z "$(find "$shared/.update-stamp" -mmin -60 2>/dev/null)" ]; then
+  : > "$shared/.update-stamp" 2>/dev/null
+  ( "$shared/claude-session" --update --auto </dev/null >>"$shared/update.log" 2>&1 & ) 2>/dev/null
+fi
 if [ -f "$cfg/.ccb-account" ] && command -v jq >/dev/null 2>&1; then
   pin="$(cat "$cfg/.ccb-account" 2>/dev/null)"
   acct="$(jq -r '.oauthAccount.emailAddress // ""' "$cfg/.claude.json" 2>/dev/null)"

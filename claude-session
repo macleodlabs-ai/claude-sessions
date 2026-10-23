@@ -19,6 +19,7 @@
 #   claude-session --rotate macleod [macleod-2]  # switch a running pool session's account now
 #   /rotate [macleod-2]                       # same, typed inside the pooled session
 #   cc-macleod-2                              # run pool account #2 directly (logs in first if needed)
+#   claude-session --update                   # pull the latest version and refresh every client
 #   claude-session --revert                   # remove all tooling (keep accounts)
 #   claude-session --revert --force           # also delete every client account dir
 #
@@ -59,6 +60,14 @@
 #                        CLAUDE_CONFIG_DIR to remember. NAME is any client or pool
 #                        member; a pooled client name logs in every member that
 #                        still has no credentials.
+#   --update             Fast-forward claude-session's own clone (~/.claude-shared/src,
+#                        never your dev checkout) and refresh every client from it:
+#                        skill copy, memory, statusline, helper scripts, launchers.
+#                        This also runs on its own: every cc- launch and every running
+#                        session's statusline start `--update --auto` in the
+#                        background at most hourly (a no-op unless the repo moved).
+#                        Statusline and hooks are re-read on each use, so updates
+#                        reach running sessions; CCB_NO_AUTOUPDATE=1 turns it off.
 #   --revert             Remove rc launchers, the global command, and ~/.claude-shared.
 #                        Client account dirs are kept; pooled session history is
 #                        restored to each client's primary dir first.
@@ -91,6 +100,10 @@ CLI_INSTALL_PATH="${SHARED_DIR}/claude-session"
 DEST_SKILL="${SKILLS_DIR}/claude-config-bootstrap"
 POOLS_DIR="${SHARED_DIR}/pools"
 POOL_MARKER=".ccb-pool-member"   # present in a dir => rotation member, not a client
+UPDATE_SRC="${SHARED_DIR}/src"              # --update's own clone (never your dev checkout)
+SOURCE_FILE="${SHARED_DIR}/.ccb-source"     # git URL --update pulls from
+UPDATE_STAMP="${SHARED_DIR}/.update-stamp"  # last update check; auto-update runs at most hourly
+UPDATE_LOG="${SHARED_DIR}/update.log"
 
 SENTINEL_BEGIN="<!-- claude-config-bootstrap:begin -->"   # marks a bootstrapped CLAUDE.md
 RC_BEGIN="# >>> claude-config-bootstrap launchers >>>"
@@ -106,7 +119,7 @@ if [ -z "$RC_FILE" ]; then
 fi
 
 # --- arg parsing -----------------------------------------------------------
-MODE=""; FORCE=0; ASSUME_YES=0; PIN_EMAIL=""; declare -a NAMES=()
+MODE=""; FORCE=0; ASSUME_YES=0; AUTO=0; PIN_EMAIL=""; declare -a NAMES=()
 print_help() { awk 'NR>1 && /^set -euo/{exit} NR>1' "$0" | sed 's/^# \{0,1\}//'; }
 sanitize() { printf '%s' "$1" | tr -cd '[:alnum:]_-'; }
 
@@ -124,6 +137,8 @@ while [ $# -gt 0 ]; do
     --pin)         MODE="pin"; shift
                    [ $# -ge 2 ] && { NAMES+=("$(sanitize "$1")"); PIN_EMAIL="$2"; shift 2; } ;;
     --revert) MODE="revert"; shift ;;
+    --update) MODE="update"; shift ;;
+    --auto)   AUTO=1; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     --force)  FORCE=1; ASSUME_YES=1; shift ;;
     -h|--help) print_help; exit 0 ;;
@@ -184,6 +199,19 @@ build_block() {  # prints the rc block for the current CC_DIRS + CC_MEMBERS
   # cc-member apply the same rule. Each dir also sticks to the account it was
   # first logged into (cc-account-guard pins it, and refuses a drifted dir).
   printf '_ccb_guard=%q\n' "$SHARED_DIR/cc-account-guard"
+  # Auto-update: every launch starts a background `--update --auto` at most once
+  # an hour (the statusline does the same inside running sessions). It does
+  # nothing unless the repo has new commits. CCB_NO_AUTOUPDATE=1 turns it off.
+  printf '_ccb_cli=%q _ccb_src=%q _ccb_stamp=%q _ccb_log=%q\n' "$CLI_INSTALL_PATH" "$SOURCE_FILE" "$UPDATE_STAMP" "$UPDATE_LOG"
+  cat <<'UPDATER'
+_ccb_autoupdate() {
+  [ -z "${CCB_NO_AUTOUPDATE:-}" ] && [ -f "$_ccb_src" ] || return 0
+  [ -n "$(find "$_ccb_stamp" -mmin -60 2>/dev/null)" ] && return 0
+  : > "$_ccb_stamp" 2>/dev/null
+  ( "$_ccb_cli" --update --auto </dev/null >>"$_ccb_log" 2>&1 & ) 2>/dev/null
+  return 0
+}
+UPDATER
   cat <<'RUNNER'
 _ccb_claude() {
   local d="$1"; shift
@@ -199,13 +227,13 @@ _ccb_claude() {
 RUNNER
   local d
   for d in "${CC_DIRS[@]}"; do
-    printf '%s() { if [ -f %q ]; then %q %q "$@"; else case " $* " in *" --permission-mode"*|*" --dangerously-skip-permissions"*) _ccb_claude %q "$@" ;; *) _ccb_claude %q --permission-mode auto "$@" ;; esac; fi; }\n' \
+    printf '%s() { _ccb_autoupdate; if [ -f %q ]; then %q %q "$@"; else case " $* " in *" --permission-mode"*|*" --dangerously-skip-permissions"*) _ccb_claude %q "$@" ;; *) _ccb_claude %q --permission-mode auto "$@" ;; esac; fi; }\n' \
       "$(fn_label "$d")" "$POOLS_DIR/$(basename "$d").pool" "$SHARED_DIR/cc-rotate" "$(basename "$d")" "$d" "$d"
   done
   # Pool members get a direct, non-rotating launcher named like their footer
   # label (cc-<client>-N). cc-member logs the account in first if needed.
   for d in ${CC_MEMBERS[@]+"${CC_MEMBERS[@]}"}; do
-    printf '%s() { %q %q "$@"; }\n' "$(fn_label "$d")" "$SHARED_DIR/cc-member" "$d"
+    printf '%s() { _ccb_autoupdate; %q %q "$@"; }\n' "$(fn_label "$d")" "$SHARED_DIR/cc-member" "$d"
   done
   # Global, auto-sourcing wrapper: runs the installed CLI then reloads this shell
   # so freshly-added cc-<client> launchers are usable immediately.
@@ -284,9 +312,20 @@ install_skill() {  # copy the skill into the skills dir so Claude can trigger it
 install_cli() {  # make `claude-session` globally available
   mkdir -p "$SHARED_DIR"
   if [ ! "$0" -ef "$CLI_INSTALL_PATH" ]; then
-    cp "$0" "$CLI_INSTALL_PATH"; chmod +x "$CLI_INSTALL_PATH"
+    # Copy then rename: --update re-runs from its clone while the installed
+    # copy (a bash script, read incrementally) is still executing.
+    cp "$0" "$CLI_INSTALL_PATH.new" && chmod +x "$CLI_INSTALL_PATH.new" && mv -f "$CLI_INSTALL_PATH.new" "$CLI_INSTALL_PATH"
     ok "Installed command → $CLI_INSTALL_PATH"
   fi
+  # Remember where updates come from: the origin of the checkout we run from.
+  local url; url="$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)"
+  [ -n "$url" ] && [ ! -f "$SOURCE_FILE" ] && printf '%s\n' "$url" > "$SOURCE_FILE"
+  return 0
+}
+
+install_skill_into() {  # $1 = a client's skills dir: give that client its own copy of the skill
+  local SKILLS_DIR="$1" DEST_SKILL="$1/claude-config-bootstrap"
+  install_skill
 }
 
 # --- rotation pools ----------------------------------------------------------
@@ -616,9 +655,57 @@ cmd_create() {
     [ -n "$n" ] || continue
     printf "\n${BOLD}• %s${RESET}\n" "$n"
     env -u CLAUDE_CONFIG_DIR bash "$setup" --client "$n" --clients-parent "$CLIENTS_PARENT" --shared-dir "$SHARED_DIR"
+    install_skill_into "$CLIENTS_PARENT/$n/skills"   # each account loads skills from its own dir
   done
   hdr "Shell launchers"
   rebuild_launchers
+  finish
+}
+
+cmd_update() {  # pull the latest version and refresh every client from it
+  # Phase 1 (the installed copy): fast-forward our own clone, then hand over to
+  # the new version so the refresh below always runs the latest code.
+  if [ "${CCB_UPDATE_REEXEC:-0}" != "1" ]; then
+    command -v git >/dev/null 2>&1 || die "--update needs git"
+    local url before="" after lock="$SHARED_DIR/.update.lock" rc
+    url="$(cat "$SOURCE_FILE" 2>/dev/null || true)"
+    [ -n "$url" ] || url="$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)"
+    [ -n "$url" ] || die "don't know where to update from — run it once from a git checkout: <repo>/claude-session --update"
+    mkdir -p "$SHARED_DIR"
+    if ! mkdir "$lock" 2>/dev/null; then
+      [ "$AUTO" -eq 1 ] && exit 0
+      die "another update is running (if not, remove $lock)"
+    fi
+    trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+    : > "$UPDATE_STAMP"
+    if [ -d "$UPDATE_SRC/.git" ]; then
+      before="$(git -C "$UPDATE_SRC" rev-parse HEAD)"
+      git -C "$UPDATE_SRC" pull -q --ff-only || die "could not fast-forward $UPDATE_SRC"
+    else
+      git clone -q "$url" "$UPDATE_SRC" || die "could not clone $url"
+    fi
+    printf '%s\n' "$url" > "$SOURCE_FILE"
+    after="$(git -C "$UPDATE_SRC" rev-parse HEAD)"
+    [ "$AUTO" -eq 1 ] && [ "$before" = "$after" ] && exit 0   # nothing new
+    hdr "Updating claude-session to $(git -C "$UPDATE_SRC" log -1 --format='%h %s')"
+    set +e
+    CCB_UPDATE_REEXEC=1 bash "$UPDATE_SRC/claude-session" --update $([ "$AUTO" -eq 1 ] && echo --auto)
+    rc=$?; set -e
+    exit "$rc"
+  fi
+  # Phase 2 (the new version): refresh exactly what --create would, for every client.
+  install_cli
+  install_rotate
+  local setup d; setup="$(find_setup)" || die "setup.sh not found"
+  discover_dirs
+  for d in ${CC_DIRS[@]+"${CC_DIRS[@]}"}; do
+    printf "\n${BOLD}• %s${RESET}\n" "${d##*/}"
+    env -u CLAUDE_CONFIG_DIR bash "$setup" --client "${d##*/}" --clients-parent "$CLIENTS_PARENT" --shared-dir "$SHARED_DIR"
+    install_skill_into "$d/skills"
+  done
+  hdr "Shell launchers"
+  rebuild_launchers
+  [ "$AUTO" -eq 1 ] && { printf '%s updated\n' "$(date '+%F %T')"; return 0; }
   finish
 }
 
@@ -970,4 +1057,5 @@ case "$MODE" in
   rotate)      cmd_rotate ;;
   pin)         cmd_pin ;;
   revert) cmd_revert ;;
+  update) cmd_update ;;
 esac
