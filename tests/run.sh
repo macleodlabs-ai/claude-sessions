@@ -203,5 +203,52 @@ check "shows API when an env key will be billed" "$(mode api $KEY)" "🔑 API"
 check "shows sub when the dir rejected the env key" "$(mode rej $KEY)" "💳 sub"
 
 # ---------------------------------------------------------------------------
+echo "claude-session --update (and hourly auto-update)"
+sandbox update
+G="git -c user.name=t -c user.email=t@t -c init.defaultBranch=main"
+mkdir -p "$T/remote" && (cd "$REPO" && git ls-files -co --exclude-standard | grep -v '^assets/' | while IFS= read -r f; do
+  [ -f "$f" ] && mkdir -p "$T/remote/$(dirname "$f")" && cp -p "$f" "$T/remote/$f"; done)
+(cd "$T/remote" && $G init -q && $G add -A && $G commit -qm base)
+git clone -q "$T/remote" "$T/dev"
+cs_env() { env -u CLAUDE_CONFIG_DIR SHARED_DIR="$T/shared" CLIENTS_PARENT="$T/c" RC_FILE="$T/rc" SKILLS_DIR="$T/defskills" "$@"; }
+rm -f "$T/shared/cc-"*   # start from a clean install
+cs_env bash "$T/dev/claude-session" -y --create c1 >/dev/null 2>&1
+check "--create records where updates come from" "$(cat "$T/shared/.ccb-source" 2>/dev/null)" "$T/remote"
+# Each account loads skills from its own config dir; the skill used to land only
+# in the dir of the session that ran the installer (2026-10-23).
+check "--create gives the client its own copy of the skill" \
+  "$([ -f "$T/c/c1/skills/claude-config-bootstrap/SKILL.md" ] && echo yes || echo no)" "yes"
+echo "# marker-v2" >> "$T/remote/claude-config-bootstrap/scripts/cc-member"
+echo "marker-v2" >> "$T/remote/claude-config-bootstrap/README.md"
+(cd "$T/remote" && $G commit -qam v2)
+cs_env "$T/shared/claude-session" --update --auto > "$T/up.log" 2>&1
+check "--update installs the new scripts without a pull or --create by hand" \
+  "$(tail -n 1 "$T/shared/cc-member")" "# marker-v2"
+check "--update refreshes every client's skill copy" \
+  "$(grep -c marker-v2 "$T/c/c1/skills/claude-config-bootstrap/README.md" 2>/dev/null)" "1"
+check "--update leaves the dev checkout alone (it pulls into its own clone)" \
+  "$(grep -c marker-v2 "$T/dev/claude-config-bootstrap/scripts/cc-member")" "0"
+check "the launcher block calls the auto-updater" "$(grep -c '_ccb_autoupdate; ' "$T/rc")" "1"
+cs_env "$T/shared/claude-session" --update --auto > "$T/up2.log" 2>&1; rc=$?
+check "--auto with nothing new does nothing" "$rc $(grep -c updated "$T/up2.log")" "0 0"
+mkdir "$T/shared/.update.lock"
+cs_env "$T/shared/claude-session" --update --auto > "$T/up3.log" 2>&1; rc=$?
+check "--auto backs off while another update holds the lock" "$rc $(wc -c < "$T/up3.log" | tr -d ' ')" "0 0"
+rmdir "$T/shared/.update.lock"
+# The hourly throttle: launches and statusline refreshes must not spawn an update each time.
+printf '#!/bin/bash\necho "$*" >> %q\n' "$T/auto.log" > "$T/fakecli"; chmod +x "$T/fakecli"
+auto() { bash -c "source '$T/rc' 2>/dev/null; _ccb_cli='$T/fakecli'; _ccb_autoupdate; sleep 0.3"; }
+: > "$T/shared/.update-stamp"; auto
+check "auto-update is skipped within an hour of the last check" "$(cat "$T/auto.log" 2>/dev/null)" ""
+touch -t 202001010000 "$T/shared/.update-stamp"; auto
+check "auto-update starts in the background once the hour has passed" "$(cat "$T/auto.log" 2>/dev/null)" "--update --auto"
+# Inside a running session the statusline is the trigger, so long sessions update too.
+rm -f "$T/auto.log"; cp "$T/fakecli" "$T/shared/claude-session"
+awk "/<<'SL'\$/{f=1;next} /^SL\$/{f=0} f" "$SCRIPTS/setup.sh" > "$T/shared/statusline.sh"
+touch -t 202001010000 "$T/shared/.update-stamp"
+printf '{"cwd":"%s"}' "$T" | CLAUDE_CONFIG_DIR="$T/c/c1" bash "$T/shared/statusline.sh" >/dev/null 2>&1; sleep 0.3
+check "a running session's statusline starts the hourly auto-update" "$(cat "$T/auto.log" 2>/dev/null)" "--update --auto"
+
+# ---------------------------------------------------------------------------
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

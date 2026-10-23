@@ -79,6 +79,24 @@ claude-session --delete clientA     # remove one or more clients (prompts first)
 Every subcommand is idempotent and refreshes the launchers from the live set of
 clients (the shell reloads automatically).
 
+### Updating
+
+It updates itself. Every `cc-<client>` launch, and every running session's
+footer, checks for a new version in the background at most once an hour. When
+the repo has new commits, it refreshes every client: skill, memory, footer,
+helper scripts and launchers. The footer and hooks are re-read on every use,
+so running sessions pick up the update without a restart. Already-open shells
+get new launcher functions the next time the rc file is sourced. To update right
+now:
+
+```bash
+claude-session --update
+```
+
+It pulls into its own clone (`~/.claude-shared/src`), never into your checkout,
+and logs automatic runs to `~/.claude-shared/update.log`. Set
+`CCB_NO_AUTOUPDATE=1` to turn automatic updates off.
+
 ### Permission mode
 
 Every `cc-<client>` launch runs in **auto** permission mode (`--permission-mode

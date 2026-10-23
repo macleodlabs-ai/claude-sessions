@@ -64,6 +64,7 @@ claude-session --login <name>          # (re)log in an account by name; a pooled
 claude-session --pool-remove <name>    # remove a member; last removal disbands
 claude-session --pin <name> <email>    # change a dir's pin (first login auto-pins); rotation skips / footer flags a mismatch
 claude-session --usage <client>        # every member's 5h/7d usage; flags two dirs on one account
+claude-session --update                # pull the latest version, refresh every client (also runs hourly on its own)
 claude-session --rotate <client> [m]   # switch a running pool session's account now (/rotate [m] inside it)
 cc-<client>-N                          # run one member directly (logs in first if needed; no rotation)
 ```
