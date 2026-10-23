@@ -246,24 +246,25 @@ fi
 if [ "$INSTALL_STATUSLINE" -eq 1 ]; then
   hdr "Client-aware statusline"
 
-  # 5a. the shared script
-  if [ -f "$STATUSLINE_SCRIPT" ]; then
-    ok "Statusline script exists: $STATUSLINE_SCRIPT"
-  else
-    if [ "$DRY_RUN" -eq 1 ]; then add "Would install statusline script: $STATUSLINE_SCRIPT"
-    else
-      cat > "$STATUSLINE_SCRIPT" <<'SL'
+  # 5a. the shared script. A managed copy (our header line) that has drifted
+  # from this version is updated, keeping the old one as .ccbak; a script the
+  # user replaced with their own is left alone.
+  sl_new="$(mktemp)"
+  cat > "$sl_new" <<'SL'
 #!/usr/bin/env bash
 # Client-aware statusline. Reads CLAUDE_CONFIG_DIR (inherited from the shell that
 # launched claude) to label which client/billing entity this session belongs to.
 # Appends usage: context-window %, 5h/7d rate-limit % (with reset time when hot),
 # session cost, and lines added/removed (fields present since CC 2.1.x).
+# In a rotation pool it also records this account's 5h/7d usage under
+# <shared>/usage/ and shows the other pool accounts' last-seen usage (↻).
 input=$(cat)
 
 cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 label="$(basename "$cfg")"
 label="${label#.claude-}"
 [ "$label" = ".claude" ] && label="DEFAULT(~/.claude)"
+shared="$(cd "$(dirname "$0")" && pwd)"
 
 # Distinct color per label so tabs are visually separable.
 case "$label" in
@@ -271,15 +272,16 @@ case "$label" in
   *)        tag=$'\033[1;36m'"● ${label}"$'\033[0m' ;;
 esac
 
-model="?"; dir=""; ctx=""; five=""; five_reset=""; seven=""; cost=""; added=""; removed=""
+model="?"; dir=""; ctx=""; five=""; five_reset=""; seven=""; seven_reset=""; cost=""; added=""; removed=""
 if command -v jq >/dev/null 2>&1; then
-  IFS=$'\t' read -r model dir ctx five five_reset seven cost added removed < <(printf '%s' "$input" | jq -r '[
+  IFS=$'\t' read -r model dir ctx five five_reset seven seven_reset cost added removed < <(printf '%s' "$input" | jq -r '[
     (.model.display_name // "?"),
     (.workspace.current_dir // .cwd // ""),
     (.context_window.used_percentage // -1 | round),
     (.rate_limits.five_hour.used_percentage // -1 | round),
     (.rate_limits.five_hour.resets_at // 0),
     (.rate_limits.seven_day.used_percentage // -1 | round),
+    (.rate_limits.seven_day.resets_at // 0),
     (.cost.total_cost_usd // -1),
     (.cost.total_lines_added // 0),
     (.cost.total_lines_removed // 0)
@@ -295,7 +297,36 @@ pct_paint() {
   else printf '\033[32m%s%%\033[0m' "$1"; fi
 }
 
-printf '%s \033[2m│\033[0m %s \033[2m│\033[0m 📁 %s' "$tag" "$model" "$base"
+printf '%s' "$tag"
+# Billing mode: an API key in claude's environment wins over the subscription
+# unless this dir rejected it (claude keys its approve/reject list by the key's
+# last 20 chars). The cc- launchers drop the key for subscription dirs.
+key="${ANTHROPIC_API_KEY:-}"
+if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then mode=api
+elif [ -n "$key" ]; then
+  mode=api
+  if command -v jq >/dev/null 2>&1 && jq -e --arg k "${key: -20}" \
+      '(.customApiKeyResponses.rejected // []) | index($k) != null' "$cfg/.claude.json" >/dev/null 2>&1; then
+    mode=sub
+  fi
+elif grep -qE '"oauthAccount": *\{' "$cfg/.claude.json" 2>/dev/null; then mode=sub
+else mode=""; fi
+case "$mode" in
+  sub) printf ' \033[32m💳 sub\033[0m' ;;
+  api) printf ' \033[1;43;30m 🔑 API \033[0m' ;;
+esac
+printf ' \033[2m│\033[0m %s \033[2m│\033[0m 📁 %s' "$model" "$base"
+# Pinned account: the first login sticks (cc-account-guard pins it and locks the
+# org). If a /login inside a rotated session moved this dir onto another pool
+# member's account, the guard rotates the session to that member; either way
+# the banner below flags the mismatch.
+[ -x "$shared/cc-account-guard" ] && "$shared/cc-account-guard" --session "$cfg" >/dev/null 2>&1
+if [ -f "$cfg/.ccb-account" ] && command -v jq >/dev/null 2>&1; then
+  pin="$(cat "$cfg/.ccb-account" 2>/dev/null)"
+  acct="$(jq -r '.oauthAccount.emailAddress // ""' "$cfg/.claude.json" 2>/dev/null)"
+  [ -n "$acct" ] && [ "$acct" != "$pin" ] && \
+    printf ' \033[1;41;97m ⚠ logged in as %s — %s is pinned to %s \033[0m' "$acct" "$label" "$pin"
+fi
 [ -n "$branch" ] && printf ' \033[2m│\033[0m 🌿 %s' "$branch"
 
 if [ -n "$ctx" ] && [ "$ctx" -ge 0 ] 2>/dev/null; then
@@ -313,15 +344,63 @@ if [ -n "$five" ] && [ "$five" -ge 0 ] 2>/dev/null; then
   fi
 fi
 
+# Rotation pool: the primary owns <shared>/pools/<label>.pool; a member's
+# .ccb-pool-member names its primary.
+client="$label"
+[ -f "$cfg/.ccb-pool-member" ] && client="$(cat "$cfg/.ccb-pool-member" 2>/dev/null)"
+pool="$shared/pools/$client.pool"
+if [ -f "$pool" ]; then
+  now=$(date +%s)
+  if [ -n "$five" ] && [ "$five" -ge 0 ] 2>/dev/null; then
+    mkdir -p "$shared/usage" 2>/dev/null
+    printf '%s\t%s\t%s\t%s\t%s\n' "$now" "$five" "$five_reset" "$seven" "$seven_reset" \
+      > "$shared/usage/$label.tsv.$$" 2>/dev/null && mv -f "$shared/usage/$label.tsv.$$" "$shared/usage/$label.tsv" 2>/dev/null
+  fi
+  while IFS= read -r m; do
+    case "$m" in ''|\#*) continue ;; esac
+    [ "$m" = "$cfg" ] && continue
+    ml="${m##*/}"
+    printf ' \033[2m│ ↻ %s\033[0m ' "$ml"
+    if ! IFS=$'\t' read -r at mf mfr ms msr 2>/dev/null < "$shared/usage/$ml.tsv"; then
+      printf '\033[2m—\033[0m'; continue
+    fi
+    # A window that has reset since the reading is back to 0%.
+    [ "${mfr:-0}" -gt 0 ] && [ "$mfr" -le "$now" ] 2>/dev/null && mf=0
+    [ "${msr:-0}" -gt 0 ] && [ "$msr" -le "$now" ] 2>/dev/null && ms=0
+    printf '\033[2m5h\033[0m '; pct_paint "$mf"
+    [ "${ms:--1}" -ge 0 ] 2>/dev/null && { printf ' \033[2m7d\033[0m '; pct_paint "$ms"; }
+    # Same 5h reset instant AND same 5h/7d % on a fresh reading = the same
+    # subscription logged into two pool dirs: rotating between them gains nothing.
+    if [ "${five_reset:-0}" -gt 0 ] 2>/dev/null && [ "$mfr" = "$five_reset" ] && [ "$mf" = "$five" ] \
+        && [ "$ms" = "$seven" ] && [ $((now - at)) -lt 600 ]; then
+      printf ' \033[1;33m⚠ same acct\033[0m'
+    fi
+    age=$(( (now - at) / 60 ))
+    if [ "$age" -ge 120 ]; then printf '\033[2m·%sh\033[0m' "$((age / 60))"; elif [ "$age" -ge 5 ]; then printf '\033[2m·%sm\033[0m' "$age"; fi
+  done < "$pool"
+fi
+
 if [ -n "$cost" ] && [ "$cost" != "-1" ]; then
   printf ' \033[2m│\033[0m \033[2m$%.2f +%s/-%s\033[0m' "$cost" "$added" "$removed"
 fi
 printf '\n'
 SL
-      chmod +x "$STATUSLINE_SCRIPT"
+  if [ -f "$STATUSLINE_SCRIPT" ] && cmp -s "$sl_new" "$STATUSLINE_SCRIPT"; then
+    ok "Statusline script exists: $STATUSLINE_SCRIPT"
+  elif [ -f "$STATUSLINE_SCRIPT" ] && ! grep -q '^# Client-aware statusline' "$STATUSLINE_SCRIPT"; then
+    warn "Statusline script is customized — left as is: $STATUSLINE_SCRIPT"
+  elif [ "$DRY_RUN" -eq 1 ]; then
+    add "Would install/update statusline script: $STATUSLINE_SCRIPT"
+  else
+    if [ -f "$STATUSLINE_SCRIPT" ]; then
+      cp "$STATUSLINE_SCRIPT" "${STATUSLINE_SCRIPT}.ccbak"
+      add "Updated statusline script: $STATUSLINE_SCRIPT (previous: ${STATUSLINE_SCRIPT}.ccbak)"
+    else
       add "Installed statusline script: $STATUSLINE_SCRIPT"
     fi
+    cp "$sl_new" "$STATUSLINE_SCRIPT"; chmod +x "$STATUSLINE_SCRIPT"
   fi
+  rm -f "$sl_new"
   # Ensure executable even if it pre-existed.
   [ "$DRY_RUN" -eq 0 ] && [ -f "$STATUSLINE_SCRIPT" ] && chmod +x "$STATUSLINE_SCRIPT"
 

@@ -198,6 +198,9 @@ walkthrough is in the repo README; this section is the reference.
 |---|---|---|
 | Supervisor | `~/.claude-shared/cc-rotate` | Launches `claude` per pool dir; on the rotate signal relaunches the next dir with `--resume <session-id>` |
 | Hook helper | `~/.claude-shared/cc-rotate-kill` | `StopFailure` hook target; signals the supervisor and TERMs claude |
+| Manual rotate | `~/.claude-shared/cc-rotate-now` | Backs `/rotate [member]` and `claude-session --rotate`; writes `manual:[member]` into the rotate flag, so the supervisor neither counts it as a rate limit nor auto-submits a turn |
+| Account pin | `<config-dir>/.ccb-account` | Email the dir must be logged into: its first login, pinned automatically by `cc-account-guard` (plus a `forceLoginOrgUUID` org lock), or set with `claude-session --pin`. Inside a rotated session, a dir that drifts onto another member's account switches the session to that member. `cc-rotate` skips a mismatched dir, `cc-member` refuses it, `--login` pre-fills (`claude auth login --email`) and verifies it, the footer flags it |
+| Usage cache | `~/.claude-shared/usage/<member>.tsv` | Written by the statusline on each render (5h/7d % + reset times); read by the footer's `↻` segment and `claude-session --usage` |
 | Pool file | `~/.claude-shared/pools/<client>.pool` | Ordered list of config-dir paths — rotation order, primary first |
 | Shared history | `~/.claude-shared/pools/<client>-projects/` | The pool's one real `projects/` dir; every member's `projects` is a symlink to it |
 | Member launcher | `~/.claude-shared/cc-member` | Backs each member's `cc-<client>-N` launcher: logs the account in if needed (`claude auth login`), warns if it shares the primary's account, syncs tooling from the primary, then launches without rotation |
@@ -298,6 +301,7 @@ claude-config-bootstrap/
     ├── setup.sh         # The idempotent per-config-dir setup script
     ├── cc-rotate        # Rotation supervisor (installed to ~/.claude-shared by the CLI)
     ├── cc-rotate-kill   # StopFailure hook helper (installed alongside it)
+    ├── cc-rotate-now    # Manual rotation trigger (/rotate, claude-session --rotate)
     ├── cc-pool-sync     # Tooling parity between pool members
     └── cc-member        # Direct, non-rotating launcher for one pool member
 ```

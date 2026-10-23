@@ -53,11 +53,14 @@ auth_email() {  # $1 = config dir: logged-in account email ("" if none)
     | sed -n 's/.*"email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
 }
 
-# 1. Log in if needed.
+PINNED="$(cat "$DIR/.ccb-account" 2>/dev/null || true)"   # set by `claude-session --pin`
+
+# 1. Log in if needed (pre-filled with the pinned account, if any).
 if ! command claude auth status >/dev/null 2>&1; then
   note "this account isn't logged in yet — starting login."
-  [ -n "$PRIMARY" ] && note "Sign in with a ${BOLD}DIFFERENT${RESET} subscription than '$PRIMARY' uses; if the browser picks your usual account, switch accounts on the OAuth page."
-  command claude auth login
+  if [ -n "$PINNED" ]; then note "Sign in as ${BOLD}${PINNED}${RESET} (the account this dir is pinned to)."
+  elif [ -n "$PRIMARY" ]; then note "Sign in with a ${BOLD}DIFFERENT${RESET} subscription than '$PRIMARY' uses; if the browser picks your usual account, switch accounts on the OAuth page."; fi
+  command claude auth login ${PINNED:+--email "$PINNED"}
   if ! command claude auth status >/dev/null 2>&1; then
     fail "still not logged in — run $LABEL again to retry."
     exit 1
@@ -65,7 +68,14 @@ if ! command claude auth status >/dev/null 2>&1; then
   printf "${GREEN}%s:${RESET} logged in.\n" "$LABEL" >&2
 fi
 
-# 2. Same subscription as the primary defeats the pool — say so.
+# 2. Stick to the first account: pin it on first launch, refuse if the dir is
+# now on any other account rather than spend that one.
+if [ -x "$SHARED_DIR/cc-account-guard" ] && ! "$SHARED_DIR/cc-account-guard" "$DIR"; then
+  fail "not launching ${DIR##*/} on the wrong account."
+  exit 1
+fi
+
+# 2b. Same subscription as the primary defeats the pool — say so.
 if [ -n "$PRIMARY" ] && [ -d "$PRIMARY_DIR" ]; then
   me="$(auth_email "$DIR")"; them="$(auth_email "$PRIMARY_DIR")"
   if [ -n "$me" ] && [ "$me" = "$them" ]; then
@@ -87,4 +97,7 @@ case " $* " in
   *) args+=(--permission-mode auto) ;;
 esac
 [ "$#" -gt 0 ] && args+=("$@")
+# A subscription login beats an API key in the environment (see _ccb_claude
+# in the launcher block).
+grep -qE '"oauthAccount": *\{' "$DIR/.claude.json" 2>/dev/null && unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
 exec claude "${args[@]}"
