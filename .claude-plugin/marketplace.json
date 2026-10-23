@@ -1,0 +1,12 @@
+{
+  "name": "claude-sessions",
+  "owner": { "name": "Macleod Labs", "url": "https://macleodlabs.ai" },
+  "description": "Isolated per-client Claude Code accounts: shared memory, client-aware footer, rate-limit rotation pools.",
+  "plugins": [
+    {
+      "name": "sessions",
+      "source": ".",
+      "description": "Per-client Claude Code accounts with shared memory, a client-aware footer, rotation pools and account pins. Keeps claude-session up to date."
+    }
+  ]
+}

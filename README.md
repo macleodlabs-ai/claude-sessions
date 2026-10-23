@@ -79,6 +79,21 @@ claude-session --delete clientA     # remove one or more clients (prompts first)
 Every subcommand is idempotent and refreshes the launchers from the live set of
 clients (the shell reloads automatically).
 
+### The plugin
+
+claude-sessions is also a Claude Code plugin, `sessions` in this repo's own
+`claude-sessions` marketplace, so it shows in `/plugin` in every account and
+updates there. `--create`/`--update` install it in every client and pool member,
+with auto-update on. To add it by hand:
+
+```
+/plugin install sessions --marketplace macleodlabs-ai/claude-sessions
+```
+
+The plugin carries the skill (as `/sessions:claude-config-bootstrap`) and a
+session-start hook. After `/plugin` updates it, the hook runs `--update`, so the
+shared scripts, footer and launchers follow straight away.
+
 ### Updating
 
 It updates itself. Every `cc-<client>` launch, and every running session's
